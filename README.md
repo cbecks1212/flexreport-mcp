@@ -18,8 +18,20 @@ API repo; the only contract is the HTTP API + a JWT.
 | `generate_research_report(query, delivery)` | `POST /generate-research-report` | Start a report job from a plain-English query → `{task_id, status}` |
 | `get_task_status(task_id)` | `GET /task-status` | Poll an async job to `SUCCESS` and read its `result` |
 | `get_report_artifact(symbols)` | `POST /get-cached-reports` | Bulk-fetch cached PDFs (base64) + a `missing` list |
+| `list_report_options(kind)` | `GET /list-realtime-event-options`, `/list-financial-items`, `/list-financial-ratios`, `/get-sectors`, `/list-institutional-investor-types`, `/list-countries`, `/get-fiscal-quarter` | Enumerate valid values for a parameter (event types, ratios, sectors, investor types, countries, fiscal quarter) |
+| `list_sub_industries(sectors)` | `GET /get-sub-industries` | Distinct industries within the given sector(s) |
+| `list_tickers(with_names)` | `GET /list-tickers` or `/list-symbols-with-names` | The covered ticker universe (optionally with company names) |
+| `get_company_snapshot(symbol)` | `GET /get-company-snapshot` | Structured snapshot: thesis, fundamentals, technicals, price targets, ownership, grades |
+| `onboard_symbol(symbol)` | `POST /onboard-symbol` | Request onboarding of an uncovered ticker (async, authed, 5/hour) |
+| `register_user(email, password)` | `POST /auth` | Register for an API key; backend emails a confirmation token (pre-auth) |
+| `confirm_registration(token)` | `GET /confirm/{token}` | Confirm a registration with the emailed token (pre-auth) |
+| `get_token(username, password)` | `POST /token` | Exchange credentials for a bearer JWT (OAuth2 password flow, pre-auth) |
+| `login(username, password)` | `POST /token` | Authenticate and **cache** the JWT for this session — auto-applied to later calls (pre-auth) |
+| `logout()` | — | Clear the session's cached JWT |
 
-Typical agent loop: **discover** events → **generate** a report → **poll** status → **fetch** artifact.
+Typical agent loop: **discover** valid params (`list_report_options`) → **discover** events → **generate** a report → **poll** status → **fetch** artifact.
+
+Auth resolution per call: explicit `bearer_token` arg → the session's cached JWT (from `login`) → the inbound `Authorization` header.
 
 ## Run locally
 
@@ -33,10 +45,30 @@ python server.py              # serves streamable-http on http://MCP_HOST:MCP_PO
 
 ## Auth
 
-1. Get a JWT once from the backend: `POST /token` (OAuth2 password flow).
-2. Configure it in your MCP client as the `Authorization: Bearer <JWT>` header.
-3. The agent's calls carry that header → this server forwards it → the backend
-   authenticates and meters the request as that user.
+Three ways to authenticate, all backed by the backend's `POST /token` (OAuth2
+password flow). Pick one — no Authorization header is required in `.mcp.json`
+unless you choose the static option.
+
+**A. `login` tool (recommended — agent-driven, no config):**
+- *New user:* `register_user(email, password)` → `confirm_registration(token)` →
+  `login(email, password)`.
+- *Existing user:* `login(email, password)`.
+- The JWT is cached **per MCP session** (keyed by the `Mcp-Session-Id` header) and
+  auto-applied to every subsequent authed call — no `bearer_token`, no header in
+  `.mcp.json`. Concurrent sessions are isolated. Call `logout` to clear it; the
+  cache is in-memory and lost on restart. A backend 401 evicts it automatically.
+
+**B. `bearer_token` arg (explicit, per-call):**
+- `get_token(email, password)` → pass the returned `access_token` as the
+  `bearer_token` arg to `generate_report` / `get_report_artifact` / etc. Overrides
+  both the cache and the header.
+
+**C. Static header (single user):**
+- Configure `Authorization: Bearer <JWT>` in your MCP client; the server forwards
+  it on every call. Simplest, but the manual injection the other two avoid.
+
+This service still holds no credentials at rest — JWTs are forwarded per-call,
+never stored.
 
 ## Wire into an MCP client
 

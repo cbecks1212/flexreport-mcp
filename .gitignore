@@ -4,3 +4,9 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+
+# MCP client config — may contain a bearer JWT
+.mcp.json
+
+# Generated report artifacts
+reports/
