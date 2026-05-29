@@ -12,6 +12,7 @@ from typing import Any, Literal, Optional
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
+from starlette.responses import PlainTextResponse
 
 from client import (
     MissingAuthError,
@@ -411,6 +412,16 @@ async def logout(ctx: Context) -> Any:
     """Clear the JWT cached for this session by `login`."""
     clear_token(_session_key(ctx))
     return {"status": "logged_out"}
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request) -> PlainTextResponse:
+    """Liveness probe for load balancers (ALB target-group health check).
+
+    Plain 200 outside the MCP protocol — the `/mcp` path speaks MCP and won't
+    return 200 to a bare GET, so point the health check here.
+    """
+    return PlainTextResponse("ok")
 
 
 if __name__ == "__main__":
