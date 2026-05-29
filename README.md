@@ -28,12 +28,10 @@ the backend is an HTTP API + a JWT.
 | `register_user(email, password)` | `POST /auth` | Register for an API key; backend emails a confirmation token (pre-auth) |
 | `confirm_registration(token)` | `GET /confirm/{token}` | Confirm a registration with the emailed token (pre-auth) |
 | `get_token(username, password)` | `POST /token` | Exchange credentials for a bearer JWT (OAuth2 password flow, pre-auth) |
-| `login(username, password)` | `POST /token` | Authenticate and **cache** the JWT for this session — auto-applied to later calls (pre-auth) |
-| `logout()` | — | Clear the session's cached JWT |
 
 Typical agent loop: **discover** valid params (`list_report_options`) → **discover** events → **generate** a report → **poll** status → **fetch** artifact.
 
-Auth resolution per call: explicit `bearer_token` arg → the session's cached JWT (from `login`) → the inbound `Authorization` header.
+Auth resolution per call: explicit `bearer_token` arg → the inbound `Authorization` header.
 
 ## Run locally
 
@@ -47,30 +45,25 @@ python server.py              # serves streamable-http on http://MCP_HOST:MCP_PO
 
 ## Auth
 
-Three ways to authenticate, all backed by the backend's `POST /token` (OAuth2
-password flow). Pick one — no Authorization header is required in `.mcp.json`
-unless you choose the static option.
+The server is **stateless** (load-balancer friendly), so auth rides each call.
+The agent self-serves it — the playbook is hardwired into the server's MCP
+`instructions`, so any connected client knows the flow:
 
-**A. `login` tool (recommended — agent-driven, no config):**
-- *New user:* `register_user(email, password)` → `confirm_registration(token)` →
-  `login(email, password)`.
-- *Existing user:* `login(email, password)`.
-- The JWT is cached **per MCP session** (keyed by the `Mcp-Session-Id` header) and
-  auto-applied to every subsequent authed call — no `bearer_token`, no header in
-  `.mcp.json`. Concurrent sessions are isolated. Call `logout` to clear it; the
-  cache is in-memory and lost on restart. A backend 401 evicts it automatically.
+**Agent-driven (default — no config):**
+- *New user:* `register_user(email, password)` → user clicks the emailed
+  confirmation link (or pastes the token to `confirm_registration`) →
+  `get_token(email, password)`.
+- *Existing user:* `get_token(email, password)`.
+- The agent passes the returned `access_token` as the `bearer_token` arg on every
+  data tool. On a 401 it re-mints and retries. No tokens in config, no restart.
 
-**B. `bearer_token` arg (explicit, per-call):**
-- `get_token(email, password)` → pass the returned `access_token` as the
-  `bearer_token` arg to `generate_report` / `get_report_artifact` / etc. Overrides
-  both the cache and the header.
+**Static header (optional):**
+- Configure `Authorization: Bearer <JWT>` in your MCP client and the server
+  forwards it on every call — handy for a single fixed user, but the agent-driven
+  path needs no config at all.
 
-**C. Static header (single user):**
-- Configure `Authorization: Bearer <JWT>` in your MCP client; the server forwards
-  it on every call. Simplest, but the manual injection the other two avoid.
-
-This service still holds no credentials at rest — JWTs are forwarded per-call,
-never stored.
+`bearer_token` (explicit) always takes precedence over the inbound header. This
+service holds no credentials at rest — JWTs are forwarded per-call, never stored.
 
 ## Wire into an MCP client
 
