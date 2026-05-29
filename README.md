@@ -1,7 +1,7 @@
 # flexreport-mcp
 
-A standalone **MCP microservice** that exposes the [FlexReport](https://flexreportfinapi.com)
-equity backend's **live earnings events** and **research-report artifacts** as on-demand
+A standalone **MCP microservice** that exposes the [FlexReport](https://app.flexreportfinapi.com/api-docs)
+equity backend's **live events** and **research-report artifacts** as on-demand
 tools for Claude (and any MCP client).
 
 It is a thin, stateless proxy over the backend's public HTTP API. It holds **no
