@@ -14,36 +14,45 @@ import httpx
 from mcp.server.fastmcp import Context, FastMCP
 from starlette.responses import PlainTextResponse
 
-from client import (
-    MissingAuthError,
-    auth_headers,
-    cache_token,
-    clear_token,
-    get_client,
-)
+from client import MissingAuthError, auth_headers, get_client
+
+# Advertised to every client on connect (MCP `instructions`) — the hardwired
+# auth playbook so any agent self-serves login without guessing.
+INSTRUCTIONS = """\
+FlexReport Finance — live market events and equity research as tools.
+
+AUTHENTICATE before any data tool. The user needs a FlexReport account + a JWT:
+- Existing user: call get_token(username=<email>, password=<password>) -> access_token.
+- New user (no account): call register_user(email, password); the backend emails a
+  confirmation link/token — have the user click the link (or paste the token to
+  confirm_registration); then call get_token.
+Pass the access_token as the `bearer_token` argument on every data tool
+(list_realtime_events, generate_report, generate_research_report,
+get_report_artifact, onboard_symbol). On HTTP 401 the token expired — call
+get_token again and retry. Do NOT ask the user to paste tokens into config files.
+
+NO AUTH NEEDED: list_report_options, list_tickers, list_sub_industries,
+get_company_snapshot, get_task_status. Use list_report_options(...) to discover
+valid parameter values instead of guessing.
+"""
 
 mcp = FastMCP(
     "flexreport",
+    instructions=INSTRUCTIONS,
     host=os.environ.get("MCP_HOST", "0.0.0.0"),
     port=int(os.environ.get("MCP_PORT", "8000")),
+    # Behind a load balancer (ALB): make each request self-contained instead of
+    # holding a long-lived per-session SSE stream the LB would choke on, and return
+    # plain JSON rather than text/event-stream. Stateless mode has no persistent
+    # session, so auth is per-call `bearer_token` (from get_token), not a cache.
+    stateless_http=True,
+    json_response=True,
 )
 
 
 def _inbound_request(ctx: Context):
     """Best-effort fetch of the inbound Starlette Request from the MCP context."""
     return getattr(ctx.request_context, "request", None)
-
-
-def _session_key(ctx: Context) -> str:
-    """Stable per-connection key for the session token cache.
-
-    Prefers the canonical streamable-http `Mcp-Session-Id` header (present on every
-    request after `initialize`); falls back to the ServerSession object identity
-    when the header is absent (e.g. stateless mode).
-    """
-    req = _inbound_request(ctx)
-    sid = req.headers.get("mcp-session-id") if req is not None else None
-    return sid or f"obj:{id(ctx.session)}"
 
 
 async def _send(
@@ -57,21 +66,16 @@ async def _send(
 ) -> Any:
     """Forward a request to the backend, returning parsed JSON or a structured error.
 
-    Auth resolution (handled by auth_headers): explicit `bearer_token` → the
-    session's cached JWT (set by `login`) → the inbound Authorization header. A
-    401 from the backend evicts the session's cached token so a stale JWT can't
-    wedge the session.
+    Auth (handled by auth_headers): explicit `bearer_token` (a JWT from `get_token`)
+    → the inbound Authorization header. On a 401 the message tells the agent to
+    re-authenticate with `get_token`.
 
     Errors (missing auth, transport failure, non-2xx) are returned as a dict with
     an "error" key rather than raised, so the agent receives a clean, readable message.
     """
-    session_key = _session_key(ctx)
     try:
         headers = auth_headers(
-            _inbound_request(ctx),
-            required=require_auth,
-            token=bearer_token,
-            session_key=session_key,
+            _inbound_request(ctx), required=require_auth, token=bearer_token
         )
     except MissingAuthError as e:
         return {"error": str(e)}
@@ -88,8 +92,7 @@ async def _send(
             detail = resp.text
         msg = f"Backend returned HTTP {resp.status_code}"
         if resp.status_code == 401:
-            clear_token(session_key)
-            msg += " — session token cleared; call `login` again."
+            msg += " — not authenticated / token expired. Call `get_token` and pass the result as `bearer_token`."
         return {"error": msg, "detail": detail}
 
     try:
@@ -106,6 +109,7 @@ async def list_realtime_events(
     sector: Optional[list[str]] = None,
     industry: Optional[list[str]] = None,
     market_cap: Optional[list[str]] = None,
+    bearer_token: Optional[str] = None,
 ) -> Any:
     """Pull live earnings/market events from the backend's Redis-backed cache (12h TTL).
 
@@ -118,6 +122,9 @@ async def list_realtime_events(
     Optionally narrow results by `tickers`, `sector`, `industry`, or `market_cap`
     (e.g. market_cap=["Large-cap","Mega-cap"]). Returns a list of event objects,
     or an empty list when the cache is cold.
+
+    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
+    retry. Omit only if the MCP client forwards an Authorization header.
     """
     body: dict[str, Any] = {"event_type": event_type}
     if tickers:
@@ -128,7 +135,7 @@ async def list_realtime_events(
         body["industry"] = industry
     if market_cap:
         body["market_cap"] = market_cap
-    return await _send(ctx, "POST", "/get-realtime-events", json=body)
+    return await _send(ctx, "POST", "/get-realtime-events", json=body, bearer_token=bearer_token)
 
 
 @mcp.tool()
@@ -326,25 +333,23 @@ async def onboard_symbol(
 
 
 # --- Auth / registration --------------------------------------------------
-# Pre-auth flows (the user has no JWT yet, so these forward NO bearer token).
+# Pre-auth flows (no JWT yet). See the server `instructions` for the full playbook.
 #
-#   New user:      register_user(email, password)   -> backend emails a token
-#                  confirm_registration(token)       -> activates the account
-#                  login(email, password)            -> authenticated (seamless)
-#   Existing user: login(email, password)            -> authenticated (seamless)
+#   New user:      register_user(email, password)  -> backend emails a link/token
+#                  confirm_registration(token)      -> (or user clicks the link)
+#                  get_token(email, password)        -> access_token
+#   Existing user: get_token(email, password)        -> access_token
 #
-# `login` caches the JWT for the current MCP session, so every subsequent authed
-# tool just works — no `bearer_token` threading and no Authorization header in the
-# MCP client config. `get_token` is the lower-level alternative: it returns the
-# raw JWT to pass as `bearer_token` or to configure as a static header.
+# Then pass access_token as `bearer_token` on every data tool. Stateless deployment,
+# so there is no server-side session/login cache — the token rides each call.
 
 @mcp.tool()
 async def register_user(ctx: Context, email: str, password: str) -> Any:
-    """Register for a FlexReport Finance API key (step 1 of the auth flow).
+    """Register a new FlexReport account (step 1 for new users).
 
-    Pre-auth — no JWT required. On success the backend emails a confirmation
-    token; pass that token to `confirm_registration` to activate the account.
-    Then obtain a JWT to authenticate the other tools.
+    Pre-auth — no JWT required. The backend emails a confirmation link/token; the
+    user clicks the link (or pastes the token to `confirm_registration`) to
+    activate, then call `get_token` to obtain a JWT.
 
     Note: `password` is sent as a tool argument, so it appears in call logs.
     """
@@ -367,14 +372,13 @@ async def confirm_registration(ctx: Context, token: str) -> Any:
 async def get_token(ctx: Context, username: str, password: str) -> Any:
     """Exchange credentials for a bearer JWT (OAuth2 password flow). Pre-auth.
 
-    Entry point for BOTH flows: a new user calls this after `confirm_registration`;
-    an existing user calls it directly. `username` is the account email.
+    THE login step. A new user calls this after confirming registration; an
+    existing user calls it directly. `username` is the account email.
 
     Returns {"access_token": "<jwt>", "token_type": "bearer"}. Pass the
-    `access_token` as the `bearer_token` argument to the authenticated tools
-    (generate_report, generate_research_report, get_report_artifact,
-    onboard_symbol) to act as this user — or set it as your MCP client's
-    Authorization header for all future sessions.
+    `access_token` as the `bearer_token` argument on every authenticated tool
+    (list_realtime_events, generate_report, generate_research_report,
+    get_report_artifact, onboard_symbol). Re-call this and retry on a 401.
 
     Note: `password` is sent as a tool argument, so it appears in call logs.
     """
@@ -382,36 +386,6 @@ async def get_token(ctx: Context, username: str, password: str) -> Any:
         ctx, "POST", "/token",
         data={"username": username, "password": password}, require_auth=False,
     )
-
-
-@mcp.tool()
-async def login(ctx: Context, username: str, password: str) -> Any:
-    """Authenticate and cache the JWT for THIS session — the seamless auth path.
-
-    Same OAuth2 password flow as `get_token`, but the JWT is stored server-side
-    for the current MCP session and auto-applied to every subsequent authenticated
-    tool call. So after `login` you don't pass `bearer_token` and the MCP client
-    needs no Authorization header. `username` is the account email.
-
-    Returns {"status": "authenticated", "user": ...} on success. Call `logout` to
-    clear it; the cache is in-memory and lost on server restart. Note: `password`
-    is sent as a tool argument, so it appears in call logs.
-    """
-    resp = await _send(
-        ctx, "POST", "/token",
-        data={"username": username, "password": password}, require_auth=False,
-    )
-    if isinstance(resp, dict) and resp.get("access_token"):
-        cache_token(_session_key(ctx), resp["access_token"])
-        return {"status": "authenticated", "user": username}
-    return resp  # surface the backend error (e.g. bad credentials) as-is
-
-
-@mcp.tool()
-async def logout(ctx: Context) -> Any:
-    """Clear the JWT cached for this session by `login`."""
-    clear_token(_session_key(ctx))
-    return {"status": "logged_out"}
 
 
 @mcp.custom_route("/health", methods=["GET"])
