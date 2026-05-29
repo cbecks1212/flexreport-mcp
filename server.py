@@ -8,12 +8,18 @@ AWS/Redis/DB or import anything from the API repo.
 """
 
 import os
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
 
-from client import MissingAuthError, auth_headers, get_client
+from client import (
+    MissingAuthError,
+    auth_headers,
+    cache_token,
+    clear_token,
+    get_client,
+)
 
 mcp = FastMCP(
     "flexreport",
@@ -27,21 +33,45 @@ def _inbound_request(ctx: Context):
     return getattr(ctx.request_context, "request", None)
 
 
+def _session_key(ctx: Context) -> str:
+    """Stable per-connection key for the session token cache.
+
+    Prefers the canonical streamable-http `Mcp-Session-Id` header (present on every
+    request after `initialize`); falls back to the ServerSession object identity
+    when the header is absent (e.g. stateless mode).
+    """
+    req = _inbound_request(ctx)
+    sid = req.headers.get("mcp-session-id") if req is not None else None
+    return sid or f"obj:{id(ctx.session)}"
+
+
 async def _send(
     ctx: Context,
     method: str,
     path: str,
     *,
     require_auth: bool = True,
+    bearer_token: Optional[str] = None,
     **kwargs: Any,
 ) -> Any:
     """Forward a request to the backend, returning parsed JSON or a structured error.
 
+    Auth resolution (handled by auth_headers): explicit `bearer_token` → the
+    session's cached JWT (set by `login`) → the inbound Authorization header. A
+    401 from the backend evicts the session's cached token so a stale JWT can't
+    wedge the session.
+
     Errors (missing auth, transport failure, non-2xx) are returned as a dict with
     an "error" key rather than raised, so the agent receives a clean, readable message.
     """
+    session_key = _session_key(ctx)
     try:
-        headers = auth_headers(_inbound_request(ctx), required=require_auth)
+        headers = auth_headers(
+            _inbound_request(ctx),
+            required=require_auth,
+            token=bearer_token,
+            session_key=session_key,
+        )
     except MissingAuthError as e:
         return {"error": str(e)}
 
@@ -55,7 +85,11 @@ async def _send(
             detail = resp.json()
         except Exception:
             detail = resp.text
-        return {"error": f"Backend returned HTTP {resp.status_code}", "detail": detail}
+        msg = f"Backend returned HTTP {resp.status_code}"
+        if resp.status_code == 401:
+            clear_token(session_key)
+            msg += " — session token cleared; call `login` again."
+        return {"error": msg, "detail": detail}
 
     try:
         return resp.json()
@@ -75,9 +109,10 @@ async def list_realtime_events(
     """Pull live earnings/market events from the backend's Redis-backed cache (12h TTL).
 
     `event_type` defaults to "eps_update". Other values include: eps_release,
-    8k_release, earnings_transcript_update, analyst_rating_update, news_evolution,
-    earnings_themes, llm_basket_update, strategy_update. The backend's
-    GET /list-realtime-event-options enumerates the authoritative set.
+    8k_release, company_update, biggest_mover, earnings_transcript_update,
+    analyst_rating_update, news_evolution, earnings_themes, llm_basket_update,
+    strategy_update. Call `list_report_options("event_types")` for the
+    authoritative, current set — do not guess.
 
     Optionally narrow results by `tickers`, `sector`, `industry`, or `market_cap`
     (e.g. market_cap=["Large-cap","Mega-cap"]). Returns a list of event objects,
@@ -100,19 +135,28 @@ async def generate_report(
     ctx: Context,
     ticker: str,
     overrides: Optional[dict] = None,
+    bearer_token: Optional[str] = None,
 ) -> Any:
     """Kick off generation of a full structured research report for one ticker.
 
     Only `ticker` is required; the backend applies sensible defaults for everything
     else. Pass `overrides` to customize the report (e.g.
     {"include_transcript": false, "ratios": [...], "filing_frequency": "annual"}).
+    Discover valid override values with `list_report_options`: "financial_items"
+    and "financial_ratios" for the line items/ratios, and
+    "institutional_investor_types" for `overrides.institutional_ownership`.
+
+    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+    use the MCP client's configured Authorization header.
 
     This is asynchronous. The response is keyed by ticker, e.g.
     {"AAPL": {"task_id": "...", "status": "PENDING"}}. Read result["AAPL"]["task_id"]
     and poll it with `get_task_status` until status is SUCCESS.
     """
     payload = {"ticker": ticker, **(overrides or {})}
-    return await _send(ctx, "POST", "/create-full-report", json=payload)
+    return await _send(
+        ctx, "POST", "/create-full-report", json=payload, bearer_token=bearer_token
+    )
 
 
 @mcp.tool()
@@ -120,18 +164,21 @@ async def generate_research_report(
     ctx: Context,
     query: str,
     delivery: str = "email",
+    bearer_token: Optional[str] = None,
 ) -> Any:
     """Generate a research report from a plain-English query (extensible, multi-section).
 
     `query` is natural language, e.g. "high-growth semis with rising estimates".
     `delivery` defaults to "email". Rate-limited to 20/hour per user server-side.
+    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+    use the MCP client's configured Authorization header.
 
     Asynchronous: returns {"task_id": "...", "status": "PENDING"}. Poll with
     `get_task_status` until SUCCESS, then read its `result`.
     """
     return await _send(
         ctx, "POST", "/generate-research-report",
-        json={"query": query, "delivery": delivery},
+        json={"query": query, "delivery": delivery}, bearer_token=bearer_token,
     )
 
 
@@ -149,14 +196,221 @@ async def get_task_status(ctx: Context, task_id: str) -> Any:
 
 
 @mcp.tool()
-async def get_report_artifact(ctx: Context, symbols: list[str]) -> Any:
+async def get_report_artifact(
+    ctx: Context,
+    symbols: list[str],
+    bearer_token: Optional[str] = None,
+) -> Any:
     """Bulk-fetch cached default PDF reports for a list of ticker symbols.
 
     Returns {"result": [{"symbol": "AAPL", "report": "<base64 pdf>"}, ...],
     "missing": ["XYZ", ...]} — `missing` lists symbols with no cached report.
     Symbols are normalized (uppercased, de-duplicated) by the backend.
+    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+    use the MCP client's configured Authorization header.
     """
-    return await _send(ctx, "POST", "/get-cached-reports", json=symbols)
+    return await _send(
+        ctx, "POST", "/get-cached-reports", json=symbols, bearer_token=bearer_token
+    )
+
+
+# --- Discovery / metadata tools -------------------------------------------
+# Let the agent enumerate valid parameter values (event types, report override
+# items, sector/industry filters) instead of guessing. All read-only and public.
+
+_OPTION_ENDPOINTS = {
+    "event_types": "/list-realtime-event-options",
+    "financial_items": "/list-financial-items",
+    "financial_ratios": "/list-financial-ratios",
+    "sectors": "/get-sectors",
+    "institutional_investor_types": "/list-institutional-investor-types",
+    "countries": "/list-countries",
+    "fiscal_quarter": "/get-fiscal-quarter",
+}
+
+
+@mcp.tool()
+async def list_report_options(
+    ctx: Context,
+    kind: Literal[
+        "event_types",
+        "financial_items",
+        "financial_ratios",
+        "sectors",
+        "institutional_investor_types",
+        "countries",
+        "fiscal_quarter",
+    ],
+) -> Any:
+    """Enumerate the valid values for a parameter, straight from the backend.
+
+    Call this BEFORE guessing a parameter value. `kind` selects which catalog:
+
+    - "event_types"                  -> valid `event_type` for `list_realtime_events`
+                                        (eps_update, company_update, biggest_mover, ...)
+    - "financial_items"              -> line items usable in a report's `overrides`
+    - "financial_ratios"             -> ratios usable in `overrides.ratios`
+    - "sectors"                      -> valid `sector` filter values
+    - "institutional_investor_types" -> valid `overrides.institutional_ownership`
+                                        values for `generate_report`
+    - "countries"                    -> covered countries
+    - "fiscal_quarter"               -> the most recent fiscal quarter being reported
+
+    Authoritative and never stale: it reads the backend's live config, not a
+    hardcoded list.
+    """
+    return await _send(ctx, "GET", _OPTION_ENDPOINTS[kind], require_auth=False)
+
+
+@mcp.tool()
+async def list_sub_industries(ctx: Context, sectors: list[str]) -> Any:
+    """List the sub-industries within one or more sectors.
+
+    `sectors` must be values from `list_report_options("sectors")`. Returns the
+    distinct industries used to narrow `list_realtime_events(industry=[...])`.
+    """
+    return await _send(
+        ctx, "GET", "/get-sub-industries",
+        params={"sector": sectors}, require_auth=False,
+    )
+
+
+@mcp.tool()
+async def list_tickers(ctx: Context, with_names: bool = False) -> Any:
+    """List the ticker universe FlexReport covers.
+
+    `with_names=False` returns bare symbols; `with_names=True` returns
+    {symbol, company_name} pairs. NOTE: this is the full universe (thousands of
+    names) and can be a large payload.
+    """
+    path = "/list-symbols-with-names" if with_names else "/list-tickers"
+    return await _send(ctx, "GET", path, require_auth=False)
+
+
+@mcp.tool()
+async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
+    """Fetch a structured company snapshot — no report generation needed.
+
+    Returns thesis/bull/bear, financial overview (Piotroski, valuation signal),
+    price performance + technical indicators, price targets, institutional
+    ownership, and analyst grades for `symbol`. Synchronous and cheap — prefer
+    this for a quick read instead of generating a full PDF report.
+    """
+    return await _send(
+        ctx, "GET", "/get-company-snapshot",
+        params={"symbol": symbol}, require_auth=False,
+    )
+
+
+@mcp.tool()
+async def onboard_symbol(
+    ctx: Context,
+    symbol: str,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Request onboarding of a NOT-yet-covered ticker (mutating, authenticated).
+
+    Kicks off a 30-60 min backend workflow and emails the authenticated user when
+    the first report is ready. Rate-limited to 5/hour per user. Use only when a
+    symbol is missing from `list_tickers` / returns no data elsewhere.
+    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+    use the MCP client's configured Authorization header.
+
+    Returns {"task_id": ..., "status": "PENDING"}.
+    """
+    return await _send(
+        ctx, "POST", "/onboard-symbol",
+        params={"symbol": symbol}, bearer_token=bearer_token,
+    )
+
+
+# --- Auth / registration --------------------------------------------------
+# Pre-auth flows (the user has no JWT yet, so these forward NO bearer token).
+#
+#   New user:      register_user(email, password)   -> backend emails a token
+#                  confirm_registration(token)       -> activates the account
+#                  login(email, password)            -> authenticated (seamless)
+#   Existing user: login(email, password)            -> authenticated (seamless)
+#
+# `login` caches the JWT for the current MCP session, so every subsequent authed
+# tool just works — no `bearer_token` threading and no Authorization header in the
+# MCP client config. `get_token` is the lower-level alternative: it returns the
+# raw JWT to pass as `bearer_token` or to configure as a static header.
+
+@mcp.tool()
+async def register_user(ctx: Context, email: str, password: str) -> Any:
+    """Register for a FlexReport Finance API key (step 1 of the auth flow).
+
+    Pre-auth — no JWT required. On success the backend emails a confirmation
+    token; pass that token to `confirm_registration` to activate the account.
+    Then obtain a JWT to authenticate the other tools.
+
+    Note: `password` is sent as a tool argument, so it appears in call logs.
+    """
+    return await _send(
+        ctx, "POST", "/auth",
+        json={"email": email, "password": password}, require_auth=False,
+    )
+
+
+@mcp.tool()
+async def confirm_registration(ctx: Context, token: str) -> Any:
+    """Confirm a registration with the emailed token (step 2 of the auth flow).
+
+    Pre-auth — no JWT required. `token` is the value emailed by `register_user`.
+    """
+    return await _send(ctx, "GET", f"/confirm/{token}", require_auth=False)
+
+
+@mcp.tool()
+async def get_token(ctx: Context, username: str, password: str) -> Any:
+    """Exchange credentials for a bearer JWT (OAuth2 password flow). Pre-auth.
+
+    Entry point for BOTH flows: a new user calls this after `confirm_registration`;
+    an existing user calls it directly. `username` is the account email.
+
+    Returns {"access_token": "<jwt>", "token_type": "bearer"}. Pass the
+    `access_token` as the `bearer_token` argument to the authenticated tools
+    (generate_report, generate_research_report, get_report_artifact,
+    onboard_symbol) to act as this user — or set it as your MCP client's
+    Authorization header for all future sessions.
+
+    Note: `password` is sent as a tool argument, so it appears in call logs.
+    """
+    return await _send(
+        ctx, "POST", "/token",
+        data={"username": username, "password": password}, require_auth=False,
+    )
+
+
+@mcp.tool()
+async def login(ctx: Context, username: str, password: str) -> Any:
+    """Authenticate and cache the JWT for THIS session — the seamless auth path.
+
+    Same OAuth2 password flow as `get_token`, but the JWT is stored server-side
+    for the current MCP session and auto-applied to every subsequent authenticated
+    tool call. So after `login` you don't pass `bearer_token` and the MCP client
+    needs no Authorization header. `username` is the account email.
+
+    Returns {"status": "authenticated", "user": ...} on success. Call `logout` to
+    clear it; the cache is in-memory and lost on server restart. Note: `password`
+    is sent as a tool argument, so it appears in call logs.
+    """
+    resp = await _send(
+        ctx, "POST", "/token",
+        data={"username": username, "password": password}, require_auth=False,
+    )
+    if isinstance(resp, dict) and resp.get("access_token"):
+        cache_token(_session_key(ctx), resp["access_token"])
+        return {"status": "authenticated", "user": username}
+    return resp  # surface the backend error (e.g. bad credentials) as-is
+
+
+@mcp.tool()
+async def logout(ctx: Context) -> Any:
+    """Clear the JWT cached for this session by `login`."""
+    clear_token(_session_key(ctx))
+    return {"status": "logged_out"}
 
 
 if __name__ == "__main__":

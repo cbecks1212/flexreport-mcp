@@ -1,0 +1,15 @@
+services:
+  flexreport-mcp:
+    build: .
+    image: flexreport-mcp
+    container_name: flexreport-mcp
+    ports:
+      # host:container — keep host port aligned with .mcp.json (http://localhost:8000/mcp)
+      - "${MCP_PORT:-8000}:8000"
+    environment:
+      # Backend the proxy calls. Defaults to prod; override for local backend.
+      API_BASE_URL: "${API_BASE_URL:-https://flexreportfinapi.com}"
+      API_HTTP_TIMEOUT: "${API_HTTP_TIMEOUT:-60}"
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8000"
+    restart: unless-stopped
