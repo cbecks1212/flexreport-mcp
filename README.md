@@ -4,10 +4,12 @@ A standalone **MCP microservice** that exposes the [FlexReport](https://app.flex
 equity backend's **live events** and **research-report artifacts** as on-demand
 tools for Claude (and any MCP client).
 
-It is a thin, stateless proxy over the backend's public HTTP API. It holds **no
-credentials** and never touches AWS/Redis/DB — it forwards the caller's bearer JWT
-so the backend handles auth, plan quota, and rate limits. No code is shared with the
-API repo; the only contract is the HTTP API + a JWT.
+It lets AI agents pull in real-time market events and research on demand, so they
+can surface the insights that matter most to you.
+
+It's a thin, stateless proxy over the backend's public HTTP API: it holds no
+credentials and only forwards the caller's bearer JWT, so the entire contract with
+the backend is an HTTP API + a JWT.
 
 ## Tools
 
