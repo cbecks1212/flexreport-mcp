@@ -331,6 +331,46 @@ async def onboard_symbol(
         params={"symbol": symbol}, bearer_token=bearer_token,
     )
 
+@mcp.tool()
+async def screen_stocks(
+    ctx: Context,
+    metrics: Optional[dict[str, bool | float]] = None,
+    sectors: Optional[list[str]] = None,
+    sub_sectors: Optional[list[str]] = None,
+    market_cap: Optional[list[str]] = None,
+    analyst_ratings: Optional[list[str]] = None,
+    institutional_ownership: Optional[dict[str, float]] = None,
+    countries: Optional[list[str]] = None,
+    price_performance: Optional[dict[str, float]] = None,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Screen stocks by financial growth, sector, sub-industry, market cap, analyst ratings, institutional ownership, country, and price performance.
+
+    `market_cap` accepts buckets like "Small-cap", "Medium-cap", "Large-cap".
+    Discover valid values with the list tools: `list_report_options` (e.g.
+    kind="sectors", "institutional_investor_types") and `list_sub_industries`.
+
+    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+    use the MCP client's configured Authorization header. Rate-limited to 10/hour
+    per user server-side.
+
+    Asynchronous: returns a task id. Poll it with `get_task_status` until SUCCESS.
+    """
+    return await _send(
+        ctx, "POST", "/screen-stocks",
+        json={
+            "metrics": metrics or {},
+            "sectors": sectors,
+            "sub_sectors": sub_sectors,
+            "market_cap": market_cap,
+            "analyst_ratings": analyst_ratings,
+            "institutional_ownership": institutional_ownership,
+            "countries": countries,
+            "price_performance": price_performance,
+        },
+        bearer_token=bearer_token,
+    )
+
 
 # --- Auth / registration --------------------------------------------------
 # Pre-auth flows (no JWT yet). See the server `instructions` for the full playbook.
