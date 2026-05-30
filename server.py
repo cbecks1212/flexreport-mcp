@@ -372,6 +372,39 @@ async def screen_stocks(
     )
 
 
+@mcp.tool()
+async def optimize_portfolio(
+    ctx: Context,
+    symbols: list[str],
+    risk_tolerance: Optional[Literal["conservative", "balanced", "aggressive"]] = None,
+    delivery: Optional[str] = "dashboard",
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Build a risk-optimized portfolio from a non-empty list of tickers.
+
+    Scores `symbols` with the multi-signal scorer, LLM-curates, and risk-optimizes.
+    `risk_tolerance` (conservative, balanced, or aggressive) selects which risk
+    profile is recommended. `delivery` is the result channel — "dashboard"
+    (returned directly) or "email".
+
+    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+    use the MCP client's configured Authorization header. Rate-limited to 10/hour
+    per user server-side.
+
+    Asynchronous: returns {"task_id": ..., "status": "PENDING", "supported": [...],
+    "not_supported": [...]}. Poll `task_id` with `get_task_status` until SUCCESS.
+    """
+    return await _send(
+        ctx, "POST", "/optimize-symbols",
+        json={
+            "symbols": symbols,
+            "risk_tolerance": risk_tolerance,
+            "delivery": delivery,
+        },
+        bearer_token=bearer_token,
+    )
+
+
 # --- Auth / registration --------------------------------------------------
 # Pre-auth flows (no JWT yet). See the server `instructions` for the full playbook.
 #
