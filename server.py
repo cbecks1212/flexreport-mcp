@@ -145,7 +145,12 @@ async def generate_report(
     overrides: Optional[dict] = None,
     bearer_token: Optional[str] = None,
 ) -> Any:
-    """Kick off generation of a full structured research report for one ticker.
+    """Generate a BESPOKE full structured research report for one ticker (slow, on-demand).
+
+    NOT the default path. Prefer `get_report_artifact` for an ordinary report request
+    — it returns the pre-built cached PDF instantly. Reach for THIS tool only when the
+    user wants something custom that the cached report can't satisfy: specific line
+    items, ratios, filing frequency, institutional-ownership cuts, or other `overrides`.
 
     Only `ticker` is required; the backend applies sensible defaults for everything
     else. Pass `overrides` to customize the report (e.g.
@@ -210,6 +215,11 @@ async def get_report_artifact(
     bearer_token: Optional[str] = None,
 ) -> Any:
     """Bulk-fetch cached default PDF reports for a list of ticker symbols.
+
+    THE DEFAULT path for any ordinary "get me a report / reports" request — it
+    returns pre-built reports instantly and cheaply. Use this unless the user clearly
+    wants a customized report (specific line items, ratios, filing frequency, etc.),
+    in which case use `generate_report`.
 
     Returns {"result": [{"symbol": "AAPL", "report": "<base64 pdf>"}, ...],
     "missing": ["XYZ", ...]} — `missing` lists symbols with no cached report.
@@ -402,6 +412,27 @@ async def optimize_portfolio(
             "delivery": delivery,
         },
         bearer_token=bearer_token,
+    )
+
+
+@mcp.tool()
+async def get_stock_picks(
+    ctx: Context,
+    strategy_name: Optional[str] = None,
+) -> Any:
+    """Fetch the latest LLM-selected stock picks (current rebalance holdings).
+
+    Returns the holdings selected for the most recent rebalance date — the names the
+    backend's strategies are currently positioned in. Each pick is a record (ticker,
+    strategy, weight, rebalance date, and related fields).
+
+    `strategy_name` optionally narrows to a single strategy (e.g. one of the
+    `strategy_update` baskets); omit it to get picks across all strategies. Synchronous
+    and read-only — no auth required.
+    """
+    params = {"strategy_name": strategy_name} if strategy_name else None
+    return await _send(
+        ctx, "GET", "/get-stock-picks", params=params, require_auth=False
     )
 
 
