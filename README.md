@@ -11,6 +11,19 @@ It's a thin, stateless proxy over the backend's public HTTP API: it holds no
 credentials and only forwards the caller's bearer JWT, so the entire contract with
 the backend is an HTTP API + a JWT.
 
+## Quick Install
+
+Add the connector to Claude Code
+
+```bash
+claude mcp add --transport http flexreport https://mcp.flexreportfinapi.com/mcp
+```
+
+Then start Claude and just ask (e.g. *"pull the biggest movers from flexreport"*).
+The agent handles login for you on the first data call — register or sign in when
+prompted; you never paste a token. Add `--scope user` to make it available in every
+directory. See [Auth](#auth) for details.
+
 ## Tools
 
 | Tool | Backend endpoint | What it does |
