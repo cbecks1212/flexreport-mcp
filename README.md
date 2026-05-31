@@ -29,10 +29,11 @@ directory. See [Auth](#auth) for details.
 | Tool | Backend endpoint | What it does |
 |---|---|---|
 | `list_realtime_events(event_type, tickers, sector, industry, market_cap)` | `POST /get-realtime-events` | Pull live events (EPS updates, transcripts, ratings, …) from the 12h cache |
-| `generate_report(ticker, overrides)` | `POST /create-full-report` | Start a structured report job for a ticker → `{ticker: {task_id, status}}` |
+| `get_latest_report(symbols)` | `POST /get-cached-reports` | **Default report tool** — get the latest pre-built cached report(s) (base64 PDF) for one or more tickers, instantly, + a `missing` list |
+| `generate_report(ticker, overrides)` | `POST /create-full-report` | Build a **bespoke** report on the fly (slow, async) — only when the user wants custom line items/ratios/overrides → `{ticker: {task_id, status}}` |
 | `generate_research_report(query, delivery)` | `POST /generate-research-report` | Start a report job from a plain-English query → `{task_id, status}` |
 | `get_task_status(task_id)` | `GET /task-status` | Poll an async job to `SUCCESS` and read its `result` |
-| `get_report_artifact(symbols)` | `POST /get-cached-reports` | Bulk-fetch cached PDFs (base64) + a `missing` list |
+| `get_stock_picks(strategy_name)` | `GET /get-stock-picks` | Latest LLM-selected stock picks for the current rebalance (optionally one strategy) |
 | `list_report_options(kind)` | `GET /list-realtime-event-options`, `/list-financial-items`, `/list-financial-ratios`, `/get-sectors`, `/list-institutional-investor-types`, `/list-countries`, `/get-fiscal-quarter` | Enumerate valid values for a parameter (event types, ratios, sectors, investor types, countries, fiscal quarter) |
 | `list_sub_industries(sectors)` | `GET /get-sub-industries` | Distinct industries within the given sector(s) |
 | `list_tickers(with_names)` | `GET /list-tickers` or `/list-symbols-with-names` | The covered ticker universe (optionally with company names) |
@@ -42,7 +43,7 @@ directory. See [Auth](#auth) for details.
 | `confirm_registration(token)` | `GET /confirm/{token}` | Confirm a registration with the emailed token (pre-auth) |
 | `get_token(username, password)` | `POST /token` | Exchange credentials for a bearer JWT (OAuth2 password flow, pre-auth) |
 
-Typical agent loop: **discover** valid params (`list_report_options`) → **discover** events → **generate** a report → **poll** status → **fetch** artifact.
+Typical agent loop: for a research request, just call `get_latest_report(symbols)` to fetch the cached report instantly. Only when the user wants a customized report: **generate** it (`generate_report`) → **poll** status (`get_task_status`).
 
 Auth resolution per call: explicit `bearer_token` arg → the inbound `Authorization` header.
 
@@ -101,9 +102,9 @@ npx @modelcontextprotocol/inspector
 # Connect to http://localhost:8000/mcp with header Authorization: Bearer <JWT>
 # Confirm 5 tools list, then exercise:
 #   list_realtime_events("eps_update")        -> events (or [])
-#   generate_report("AAPL")                   -> read ["AAPL"]["task_id"]
+#   get_latest_report(["AAPL"])               -> base64 (or missing)  [default report path]
+#   generate_report("AAPL", overrides={...})  -> read ["AAPL"]["task_id"]  [bespoke only]
 #   get_task_status(task_id)                  -> eventually SUCCESS
-#   get_report_artifact(["AAPL"])             -> base64 (or missing)
 # Negative: call any JWT tool with no token   -> clean {"error": ...}, no crash
 ```
 

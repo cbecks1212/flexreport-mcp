@@ -27,13 +27,20 @@ AUTHENTICATE before any data tool. The user needs a FlexReport account + a JWT:
   confirmation link/token — have the user click the link (or paste the token to
   confirm_registration); then call get_token.
 Pass the access_token as the `bearer_token` argument on every data tool
-(list_realtime_events, generate_report, generate_research_report,
-get_report_artifact, onboard_symbol). On HTTP 401 the token expired — call
+(list_realtime_events, get_latest_report, generate_report, generate_research_report,
+onboard_symbol). On HTTP 401 the token expired — call
 get_token again and retry. Do NOT ask the user to paste tokens into config files.
 
+REPORTS — pick the right tool:
+- DEFAULT for "the report / research / analysis / writeup for <ticker>": call
+  get_latest_report(symbols=[...]). It returns the pre-built cached report instantly.
+- ONLY when the user explicitly wants a CUSTOM report (specific line items, ratios,
+  filing frequency, overrides): call generate_report. It builds a new report on the
+  fly and is slow/async. Do NOT use it for an ordinary research request.
+
 NO AUTH NEEDED: list_report_options, list_tickers, list_sub_industries,
-get_company_snapshot, get_task_status. Use list_report_options(...) to discover
-valid parameter values instead of guessing.
+get_company_snapshot, get_stock_picks, get_task_status. Use list_report_options(...)
+to discover valid parameter values instead of guessing.
 """
 
 mcp = FastMCP(
@@ -145,12 +152,14 @@ async def generate_report(
     overrides: Optional[dict] = None,
     bearer_token: Optional[str] = None,
 ) -> Any:
-    """Generate a BESPOKE full structured research report for one ticker (slow, on-demand).
+    """Build a NEW BESPOKE report on the fly for one ticker (slow, async). NOT the default.
 
-    NOT the default path. Prefer `get_report_artifact` for an ordinary report request
-    — it returns the pre-built cached PDF instantly. Reach for THIS tool only when the
-    user wants something custom that the cached report can't satisfy: specific line
-    items, ratios, filing frequency, institutional-ownership cuts, or other `overrides`.
+    ===> DO NOT use this for an ordinary "get me the report / research / analysis"
+    request — use `get_latest_report` instead, which returns the pre-built cached
+    report instantly. This tool kicks off a slow, asynchronous build and should be
+    reached for ONLY when the user explicitly wants to CUSTOMIZE the report with
+    specific line items, ratios, filing frequency, institutional-ownership cuts, or
+    other `overrides` that the cached report does not already cover.
 
     Only `ticker` is required; the backend applies sensible defaults for everything
     else. Pass `overrides` to customize the report (e.g.
@@ -209,20 +218,28 @@ async def get_task_status(ctx: Context, task_id: str) -> Any:
 
 
 @mcp.tool()
-async def get_report_artifact(
+async def get_latest_report(
     ctx: Context,
     symbols: list[str],
     bearer_token: Optional[str] = None,
 ) -> Any:
-    """Bulk-fetch cached default PDF reports for a list of ticker symbols.
+    """Get the latest FlexReport research report(s) for one or more tickers. USE THIS BY DEFAULT.
 
-    THE DEFAULT path for any ordinary "get me a report / reports" request — it
-    returns pre-built reports instantly and cheaply. Use this unless the user clearly
-    wants a customized report (specific line items, ratios, filing frequency, etc.),
-    in which case use `generate_report`.
+    ===> THIS IS THE DEFAULT, CORRECT TOOL whenever a user asks for "the report",
+    "research", "the latest research", "analysis", "a writeup", or "the PDF" for a
+    ticker (e.g. "get me the latest research on SNOW"). It returns the pre-built,
+    cached report instantly — fast and cheap. ALWAYS prefer this over generating a
+    report on the fly.
 
-    Returns {"result": [{"symbol": "AAPL", "report": "<base64 pdf>"}, ...],
-    "missing": ["XYZ", ...]} — `missing` lists symbols with no cached report.
+    Do NOT use `generate_report` for an ordinary research request — that tool builds
+    a brand-new BESPOKE report on the fly (slow, async) and is ONLY for when the user
+    explicitly asks to CUSTOMIZE the report with specific line items, ratios, filing
+    frequency, or other overrides the cached report does not already cover.
+
+    Accepts one OR many symbols. Returns
+    {"result": [{"symbol": "AAPL", "report": "<base64 pdf>"}, ...],
+    "missing": ["XYZ", ...]} — `missing` lists symbols with no cached report (for
+    those, the user may want `generate_report` or `onboard_symbol`).
     Symbols are normalized (uppercased, de-duplicated) by the backend.
     `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
     use the MCP client's configured Authorization header.
@@ -481,8 +498,8 @@ async def get_token(ctx: Context, username: str, password: str) -> Any:
 
     Returns {"access_token": "<jwt>", "token_type": "bearer"}. Pass the
     `access_token` as the `bearer_token` argument on every authenticated tool
-    (list_realtime_events, generate_report, generate_research_report,
-    get_report_artifact, onboard_symbol). Re-call this and retry on a 401.
+    (list_realtime_events, get_latest_report, generate_report,
+    generate_research_report, onboard_symbol). Re-call this and retry on a 401.
 
     Note: `password` is sent as a tool argument, so it appears in call logs.
     """
