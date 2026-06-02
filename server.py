@@ -16,11 +16,25 @@ from starlette.responses import PlainTextResponse
 
 from client import MissingAuthError, auth_headers, get_client
 
-# Advertised to every client on connect (MCP `instructions`) — the hardwired
-# auth playbook so any agent self-serves login without guessing.
-INSTRUCTIONS = """\
-FlexReport Finance — live market events and equity research as tools.
+# Auth posture (env). Controls how inbound requests are authenticated:
+#   legacy → no token validation; agent self-serves via get_token/register_user
+#            (today's behavior). Deploying new code is a no-op until you flip this.
+#   both   → OAuth Resource Server: RS256 tokens validated against the backend JWKS,
+#            non-OAuth tokens passed through (legacy static-JWT users keep working),
+#            password tools removed. Transition state.
+#   oauth  → strict: only valid RS256 OAuth tokens accepted. End state.
+AUTH_MODE = os.environ.get("AUTH_MODE", "legacy").lower()
+_OAUTH_ENABLED = AUTH_MODE in ("oauth", "both")
 
+# Mode-aware auth playbook advertised to every client on connect (MCP `instructions`).
+if _OAUTH_ENABLED:
+    _AUTH_BLOCK = """\
+AUTHENTICATE via OAuth — handled by your MCP client (e.g. Claude) in the browser.
+There are NO password/token tools: just call a data tool, and if you are not signed in
+the client runs the sign-in/consent flow for you. NEVER ask the user for a password or a
+token, and do NOT pass `bearer_token` — the client attaches the token automatically."""
+else:
+    _AUTH_BLOCK = """\
 AUTHENTICATE before any data tool. The user needs a FlexReport account + a JWT:
 - Existing user: call get_token(username=<email>, password=<password>) -> access_token.
 - New user (no account): call register_user(email, password); the backend emails a
@@ -29,7 +43,12 @@ AUTHENTICATE before any data tool. The user needs a FlexReport account + a JWT:
 Pass the access_token as the `bearer_token` argument on every data tool
 (list_realtime_events, get_latest_report, generate_report, generate_research_report,
 onboard_symbol). On HTTP 401 the token expired — call
-get_token again and retry. Do NOT ask the user to paste tokens into config files.
+get_token again and retry. Do NOT ask the user to paste tokens into config files."""
+
+INSTRUCTIONS = f"""\
+FlexReport Finance — live market events and equity research as tools.
+
+{_AUTH_BLOCK}
 
 REPORTS — pick the right tool:
 - DEFAULT for "the report / research / analysis / writeup for <ticker>": call
@@ -43,6 +62,27 @@ get_company_snapshot, get_stock_picks, get_task_status. Use list_report_options(
 to discover valid parameter values instead of guessing.
 """
 
+# OAuth Resource-Server wiring (only when AUTH_MODE enables it). The SDK then serves
+# /.well-known/oauth-protected-resource and returns 401 + WWW-Authenticate challenges,
+# pointing clients at the backend Authorization Server (issuer_url).
+_auth_settings = None
+_token_verifier = None
+if _OAUTH_ENABLED:
+    from mcp.server.auth.settings import AuthSettings
+
+    from auth_verifier import (
+        MCP_RESOURCE_URL,
+        OAUTH_ISSUER,
+        FlexReportTokenVerifier,
+    )
+
+    _token_verifier = FlexReportTokenVerifier(lenient=(AUTH_MODE == "both"))
+    _auth_settings = AuthSettings(
+        issuer_url=OAUTH_ISSUER,
+        resource_server_url=MCP_RESOURCE_URL,
+        required_scopes=[],  # backend enforces scope/plan; don't gate at the transport
+    )
+
 mcp = FastMCP(
     "flexreport",
     instructions=INSTRUCTIONS,
@@ -51,10 +91,21 @@ mcp = FastMCP(
     # Behind a load balancer (ALB): make each request self-contained instead of
     # holding a long-lived per-session SSE stream the LB would choke on, and return
     # plain JSON rather than text/event-stream. Stateless mode has no persistent
-    # session, so auth is per-call `bearer_token` (from get_token), not a cache.
+    # session, so auth is per-call (an OAuth bearer, or legacy `bearer_token`), not a cache.
     stateless_http=True,
     json_response=True,
+    auth=_auth_settings,
+    token_verifier=_token_verifier,
 )
+
+
+def _pre_auth_tool(fn):
+    """Register the legacy password/registration tools only in AUTH_MODE=legacy.
+
+    Under OAuth these are dead (transport auth rejects the token-less connection they
+    relied on) and shouldn't be advertised — sign-in moves to the browser flow.
+    """
+    return mcp.tool()(fn) if not _OAUTH_ENABLED else fn
 
 
 def _inbound_request(ctx: Context):
@@ -464,7 +515,7 @@ async def get_stock_picks(
 # Then pass access_token as `bearer_token` on every data tool. Stateless deployment,
 # so there is no server-side session/login cache — the token rides each call.
 
-@mcp.tool()
+@_pre_auth_tool
 async def register_user(ctx: Context, email: str, password: str) -> Any:
     """Register a new FlexReport account (step 1 for new users).
 
@@ -480,7 +531,7 @@ async def register_user(ctx: Context, email: str, password: str) -> Any:
     )
 
 
-@mcp.tool()
+@_pre_auth_tool
 async def confirm_registration(ctx: Context, token: str) -> Any:
     """Confirm a registration with the emailed token (step 2 of the auth flow).
 
@@ -489,7 +540,7 @@ async def confirm_registration(ctx: Context, token: str) -> Any:
     return await _send(ctx, "GET", f"/confirm/{token}", require_auth=False)
 
 
-@mcp.tool()
+@_pre_auth_tool
 async def get_token(ctx: Context, username: str, password: str) -> Any:
     """Exchange credentials for a bearer JWT (OAuth2 password flow). Pre-auth.
 
