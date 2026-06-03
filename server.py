@@ -254,7 +254,6 @@ async def generate_research_report(
         json={"query": query, "delivery": delivery}, bearer_token=bearer_token,
     )
 
-
 @mcp.tool()
 async def get_task_status(ctx: Context, task_id: str) -> Any:
     """Poll the status of an async job started by generate_report / generate_research_report.
@@ -288,10 +287,13 @@ async def get_latest_report(
     frequency, or other overrides the cached report does not already cover.
 
     Accepts one OR many symbols. Returns
-    {"result": [{"symbol": "AAPL", "report": "<base64 pdf>"}, ...],
-    "missing": ["XYZ", ...]} — `missing` lists symbols with no cached report (for
-    those, the user may want `generate_report` or `onboard_symbol`).
-    Symbols are normalized (uppercased, de-duplicated) by the backend.
+    {"result": [{"symbol": "AAPL", "url": "<presigned pdf url>"}, ...],
+    "missing": ["XYZ", ...]}. Each `url` is a short-lived presigned link (valid
+    ~6h) that downloads the PDF directly from storage — hand it to the user to
+    click; do NOT try to fetch or decode it yourself. `missing` lists symbols
+    with no cached report (for those, the user may want `generate_report` or
+    `onboard_symbol`). Symbols are normalized (uppercased, de-duplicated) by the
+    backend.
     `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
     use the MCP client's configured Authorization header.
     """
@@ -447,6 +449,45 @@ async def screen_stocks(
             "price_performance": price_performance,
         },
         bearer_token=bearer_token,
+    )
+
+@mcp.tool()
+async def optimize_portfolio_default(
+    ctx: Context,
+    symbols: list[str],
+    risk_tolerance: Optional[Literal["conservative", "balanced", "aggressive"]] = None,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Build a risk-optimized portfolio from a list of tickers — fast, synchronous, no LLM.
+
+    THE DEFAULT optimizer route. Returns the result directly and almost instantly
+    (no task id, no polling). Reach for `optimize_portfolio` instead only when you
+    explicitly want the slower LLM-curated variant layered on top of the optimizers.
+
+    `risk_tolerance` (conservative | balanced | aggressive) selects which risk
+    profile is marked as recommended. Symbols are validated against the covered
+    universe (`list_tickers`); unsupported tickers come back in `missing`, and
+    in-universe tickers with too little price history come back in `dropped`.
+
+    No auth required (public endpoint). `bearer_token` (a JWT from `get_token`) is
+    still forwarded if supplied, but is optional here.
+
+    Synchronous. Returns:
+      {"status": "OK",  # or "SKIPPED"/"EMPTY" when too few usable symbols remain
+       "holdings": [{"symbol", "source_strategies", "summary", "conviction_level"}, ...],
+       "optimizer_results": {"mvo": {...weights+diagnostics}, "hrp": {...}, "mcvar": {...}},
+       "risk_profiles": {"profiles": [...], "recommended": "..."},  # present only when status == "OK"
+       "dropped": [...],   # in-universe but insufficient price history
+       "missing": [...]}   # not in the covered universe
+    """
+    return await _send(
+        ctx, "POST", "/optimize-symbols-non-llm",
+        json={
+            "symbols": symbols,
+            "risk_tolerance": risk_tolerance,
+        },
+        bearer_token=bearer_token,
+        require_auth=False,
     )
 
 

@@ -20,16 +20,16 @@ claude mcp add --transport http flexreport https://mcp.flexreportfinapi.com/mcp
 ```
 
 Then start Claude and just ask (e.g. *"pull the biggest movers from flexreport"*).
-The agent handles login for you on the first data call — register or sign in when
-prompted; you never paste a token. Add `--scope user` to make it available in every
-directory. See [Auth](#auth) for details.
+On the first data call your MCP client runs an OAuth sign-in in your browser —
+sign in or register when prompted; you never paste a token. Add `--scope user` to
+make it available in every directory. See [Auth](#auth) for details.
 
 ## Tools
 
 | Tool | Backend endpoint | What it does |
 |---|---|---|
 | `list_realtime_events(event_type, tickers, sector, industry, market_cap)` | `POST /get-realtime-events` | Pull live events (EPS updates, transcripts, ratings, …) from the 12h cache |
-| `get_latest_report(symbols)` | `POST /get-cached-reports` | **Default report tool** — get the latest pre-built cached report(s) (base64 PDF) for one or more tickers, instantly, + a `missing` list |
+| `get_latest_report(symbols)` | `POST /get-cached-reports` | **Default report tool** — get the latest pre-built cached report(s) for one or more tickers, instantly, as short-lived presigned PDF download URLs, + a `missing` list |
 | `generate_report(ticker, overrides)` | `POST /create-full-report` | Build a **bespoke** report on the fly (slow, async) — only when the user wants custom line items/ratios/overrides → `{ticker: {task_id, status}}` |
 | `generate_research_report(query, delivery)` | `POST /generate-research-report` | Start a report job from a plain-English query → `{task_id, status}` |
 | `get_task_status(task_id)` | `GET /task-status` | Poll an async job to `SUCCESS` and read its `result` |
@@ -39,9 +39,9 @@ directory. See [Auth](#auth) for details.
 | `list_tickers(with_names)` | `GET /list-tickers` or `/list-symbols-with-names` | The covered ticker universe (optionally with company names) |
 | `get_company_snapshot(symbol)` | `GET /get-company-snapshot` | Structured snapshot: thesis, fundamentals, technicals, price targets, ownership, grades |
 | `onboard_symbol(symbol)` | `POST /onboard-symbol` | Request onboarding of an uncovered ticker (async, authed, 5/hour) |
-| `register_user(email, password)` | `POST /auth` | Register for an API key; backend emails a confirmation token (pre-auth) |
-| `confirm_registration(token)` | `GET /confirm/{token}` | Confirm a registration with the emailed token (pre-auth) |
-| `get_token(username, password)` | `POST /token` | Exchange credentials for a bearer JWT (OAuth2 password flow, pre-auth) |
+| `register_user(email, password)` | `POST /auth` | Register for an API key; backend emails a confirmation token (pre-auth, **`AUTH_MODE=legacy` only**) |
+| `confirm_registration(token)` | `GET /confirm/{token}` | Confirm a registration with the emailed token (pre-auth, **`AUTH_MODE=legacy` only**) |
+| `get_token(username, password)` | `POST /token` | Exchange credentials for a bearer JWT (OAuth2 password flow, pre-auth, **`AUTH_MODE=legacy` only**) |
 
 Typical agent loop: for a research request, just call `get_latest_report(symbols)` to fetch the cached report instantly. Only when the user wants a customized report: **generate** it (`generate_report`) → **poll** status (`get_task_status`).
 
@@ -59,25 +59,65 @@ python server.py              # serves streamable-http on http://MCP_HOST:MCP_PO
 
 ## Auth
 
-The server is **stateless** (load-balancer friendly), so auth rides each call.
-The agent self-serves it — the playbook is hardwired into the server's MCP
-`instructions`, so any connected client knows the flow:
+The server is an **OAuth 2.0 Resource Server** and **stateless** (load-balancer
+friendly), so auth rides each call. It holds **no credentials and no signing
+secret** — it validates the inbound bearer token and forwards it to the backend,
+which enforces scope, plan, and quota.
 
-**Agent-driven (default — no config):**
-- *New user:* `register_user(email, password)` → user clicks the emailed
-  confirmation link (or pastes the token to `confirm_registration`) →
-  `get_token(email, password)`.
+### How it works (OAuth)
+
+Sign-in is a standard browser **authorization-code + PKCE** flow, run by your MCP
+client (e.g. Claude) against the FlexReport backend, which is the **Authorization
+Server**. You never paste or type a token:
+
+1. On a request without a valid token the server returns `401` with a
+   `WWW-Authenticate` challenge and serves Protected Resource Metadata at
+   `/.well-known/oauth-protected-resource`, pointing the client at the backend AS.
+2. The client opens your browser; you sign in / consent and it receives an RS256
+   access token issued by the backend.
+3. The server validates that token on **every** call — signature via the
+   backend's **JWKS** (RS256 public key) plus `aud`, `iss`, and `exp` — then
+   forwards it to the backend. Invalid or expired → a clean `401` and the client
+   re-runs the flow.
+
+The server never sees your password and never holds the signing key — it stays a
+credential-free proxy.
+
+### Modes — `AUTH_MODE` (env)
+
+| `AUTH_MODE` | Behavior |
+|---|---|
+| `legacy` | No token validation. The agent self-serves credentials via the `register_user` / `confirm_registration` / `get_token` tools (password passed as a tool arg). Original behavior; those pre-auth tools are registered **only** in this mode. |
+| `both` | **OAuth Resource Server (prod today).** RS256 OAuth tokens are validated against the backend JWKS; tokens that fail RS256 are passed through as opaque, so legacy static-JWT users keep working while the backend re-validates them. Password tools removed. Transition state. |
+| `oauth` | Strict end state. Only valid RS256 OAuth tokens are accepted. |
+
+### Config (env)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `AUTH_MODE` | `legacy` | Selects the posture above |
+| `OAUTH_ISSUER` | `https://app.flexreportfinapi.com` | Expected token `iss` + advertised authorization server. **Must match the backend's `iss`** — prod uses the root domain `https://flexreportfinapi.com`. |
+| `OAUTH_AUDIENCE` | = `OAUTH_ISSUER` | Expected token `aud`. Set both sides to the canonical MCP URL for true audience binding. |
+| `OAUTH_JWKS_URL` | `{issuer}/.well-known/jwks.json` | Where public keys are fetched (decoupled from issuer for container networking). |
+| `MCP_RESOURCE_URL` | `https://mcp.flexreportfinapi.com/mcp` | This server's canonical resource identifier (the PRM `resource`). |
+
+### Static header (any mode)
+
+Configure `Authorization: Bearer <token>` in your MCP client and the server
+forwards it verbatim — an OAuth access token under `both`/`oauth`, or a legacy
+JWT under `legacy`. An explicit `bearer_token` tool arg always takes precedence
+over the inbound header. Nothing is stored at rest; tokens are forwarded per-call.
+
+### Legacy agent-driven path (`AUTH_MODE=legacy` only)
+
+The original flow, kept for backward compatibility and being retired in favor of
+OAuth (it sends the password as a tool argument, so it lands in call logs):
+
+- *New user:* `register_user(email, password)` → click the emailed link (or paste
+  the token to `confirm_registration`) → `get_token(email, password)`.
 - *Existing user:* `get_token(email, password)`.
 - The agent passes the returned `access_token` as the `bearer_token` arg on every
-  data tool. On a 401 it re-mints and retries. No tokens in config, no restart.
-
-**Static header (optional):**
-- Configure `Authorization: Bearer <JWT>` in your MCP client and the server
-  forwards it on every call — handy for a single fixed user, but the agent-driven
-  path needs no config at all.
-
-`bearer_token` (explicit) always takes precedence over the inbound header. This
-service holds no credentials at rest — JWTs are forwarded per-call, never stored.
+  data tool and re-mints on a `401`.
 
 ## Wire into an MCP client
 
@@ -102,7 +142,7 @@ npx @modelcontextprotocol/inspector
 # Connect to http://localhost:8000/mcp with header Authorization: Bearer <JWT>
 # Confirm 5 tools list, then exercise:
 #   list_realtime_events("eps_update")        -> events (or [])
-#   get_latest_report(["AAPL"])               -> base64 (or missing)  [default report path]
+#   get_latest_report(["AAPL"])               -> presigned PDF url (or missing)  [default report path]
 #   generate_report("AAPL", overrides={...})  -> read ["AAPL"]["task_id"]  [bespoke only]
 #   get_task_status(task_id)                  -> eventually SUCCESS
 # Negative: call any JWT tool with no token   -> clean {"error": ...}, no crash
