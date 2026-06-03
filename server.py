@@ -287,13 +287,16 @@ async def get_latest_report(
     frequency, or other overrides the cached report does not already cover.
 
     Accepts one OR many symbols. Returns
-    {"result": [{"symbol": "AAPL", "url": "<presigned pdf url>"}, ...],
-    "missing": ["XYZ", ...]}. Each `url` is a short-lived presigned link (valid
-    ~6h) that downloads the PDF directly from storage — hand it to the user to
-    click; do NOT try to fetch or decode it yourself. `missing` lists symbols
-    with no cached report (for those, the user may want `generate_report` or
-    `onboard_symbol`). Symbols are normalized (uppercased, de-duplicated) by the
-    backend.
+    {"result": [{"symbol": "AAPL", "url": "<presigned pdf url>",
+                 "report": "<base64 pdf>"}, ...],
+    "missing": ["XYZ", ...]}. Each hit carries BOTH representations of the same
+    PDF: `url` is a short-lived presigned link (valid ~6h) — hand it to the user
+    to download/open the document directly (and prefer it on clients that can't
+    handle a large base64 blob); `report` is the inline base64 PDF — decode it to
+    read, render, or summarize the report's contents yourself. `missing` lists
+    symbols with no cached report (for those, the user may want `generate_report`
+    or `onboard_symbol`). Symbols are normalized (uppercased, de-duplicated) by
+    the backend.
     `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
     use the MCP client's configured Authorization header.
     """
