@@ -7,7 +7,9 @@ plan quota, and rate limits. This service holds no credentials and does not touc
 AWS/Redis/DB or import anything from the API repo.
 """
 
+import json
 import os
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 import httpx
@@ -15,6 +17,10 @@ from mcp.server.fastmcp import Context, FastMCP
 from starlette.responses import PlainTextResponse
 
 from client import MissingAuthError, auth_headers, get_client
+
+# Non-code text (server instructions, auth playbooks) lives in instructions.json
+# so the copy can be edited without touching the server logic.
+_TEXT = json.loads((Path(__file__).parent / "instructions.json").read_text())
 
 # Auth posture (env). Controls how inbound requests are authenticated:
 #   legacy → no token validation; agent self-serves via get_token/register_user
@@ -27,40 +33,9 @@ AUTH_MODE = os.environ.get("AUTH_MODE", "legacy").lower()
 _OAUTH_ENABLED = AUTH_MODE in ("oauth", "both")
 
 # Mode-aware auth playbook advertised to every client on connect (MCP `instructions`).
-if _OAUTH_ENABLED:
-    _AUTH_BLOCK = """\
-AUTHENTICATE via OAuth — handled by your MCP client (e.g. Claude) in the browser.
-There are NO password/token tools: just call a data tool, and if you are not signed in
-the client runs the sign-in/consent flow for you. NEVER ask the user for a password or a
-token, and do NOT pass `bearer_token` — the client attaches the token automatically."""
-else:
-    _AUTH_BLOCK = """\
-AUTHENTICATE before any data tool. The user needs a FlexReport account + a JWT:
-- Existing user: call get_token(username=<email>, password=<password>) -> access_token.
-- New user (no account): call register_user(email, password); the backend emails a
-  confirmation link/token — have the user click the link (or paste the token to
-  confirm_registration); then call get_token.
-Pass the access_token as the `bearer_token` argument on every data tool
-(list_realtime_events, get_latest_report, generate_report, generate_research_report,
-onboard_symbol). On HTTP 401 the token expired — call
-get_token again and retry. Do NOT ask the user to paste tokens into config files."""
+_AUTH_BLOCK = _TEXT["auth_block_oauth"] if _OAUTH_ENABLED else _TEXT["auth_block_legacy"]
 
-INSTRUCTIONS = f"""\
-FlexReport Finance — live market events and equity research as tools.
-
-{_AUTH_BLOCK}
-
-REPORTS — pick the right tool:
-- DEFAULT for "the report / research / analysis / writeup for <ticker>": call
-  get_latest_report(symbols=[...]). It returns the pre-built cached report instantly.
-- ONLY when the user explicitly wants a CUSTOM report (specific line items, ratios,
-  filing frequency, overrides): call generate_report. It builds a new report on the
-  fly and is slow/async. Do NOT use it for an ordinary research request.
-
-NO AUTH NEEDED: list_report_options, list_tickers, list_sub_industries,
-get_company_snapshot, get_stock_picks, get_task_status. Use list_report_options(...)
-to discover valid parameter values instead of guessing.
-"""
+INSTRUCTIONS = _TEXT["instructions"].replace("{auth_block}", _AUTH_BLOCK)
 
 # OAuth Resource-Server wiring (only when AUTH_MODE enables it). The SDK then serves
 # /.well-known/oauth-protected-resource and returns 401 + WWW-Authenticate challenges,
@@ -203,14 +178,19 @@ async def generate_report(
     overrides: Optional[dict] = None,
     bearer_token: Optional[str] = None,
 ) -> Any:
-    """Build a NEW BESPOKE report on the fly for one ticker (slow, async). NOT the default.
+    """Build a NEW BESPOKE report on the fly for one ticker (slow, async). LAST RESORT.
 
-    ===> DO NOT use this for an ordinary "get me the report / research / analysis"
-    request — use `get_latest_report` instead, which returns the pre-built cached
-    report instantly. This tool kicks off a slow, asynchronous build and should be
-    reached for ONLY when the user explicitly wants to CUSTOMIZE the report with
-    specific line items, ratios, filing frequency, institutional-ownership cuts, or
-    other `overrides` that the cached report does not already cover.
+    ===> This is a LAST-RESORT tool, NOT the default. Reach for it ONLY when EITHER:
+      (a) `get_latest_report` has no cached report for the ticker (it came back in
+          `missing`), so there is nothing pre-built to return, OR
+      (b) the user EXPLICITLY wants to CUSTOMIZE the report with specific line items,
+          ratios, filing frequency, institutional-ownership cuts, or other `overrides`
+          that the cached report does not already cover.
+
+    DO NOT use this for an ordinary "get me the report / research / analysis" request —
+    use `get_latest_report` instead, which returns the pre-built cached report instantly.
+    For an open-ended or thematic QUESTION (about a ticker or the broader market), use
+    `generate_research_report` instead. This tool kicks off a slow, asynchronous build.
 
     Only `ticker` is required; the backend applies sensible defaults for everything
     else. Pass `overrides` to customize the report (e.g.
@@ -239,7 +219,14 @@ async def generate_research_report(
     delivery: str = "email",
     bearer_token: Optional[str] = None,
 ) -> Any:
-    """Generate a research report from a plain-English query (extensible, multi-section).
+    """Answer an OPEN-ENDED or THEMATIC research QUESTION (extensible, multi-section).
+
+    ===> THE RIGHT TOOL when the user's intent is a QUESTION rather than a request for an
+    existing report — an exploratory or thesis-style ask about a ticker, or a market-wide
+    theme not tied to one company (e.g. "Are large caps driving earnings season?",
+    "What's the bull/bear case on NVDA?", "high-growth semis with rising estimates").
+    For a plain "get me the latest report/research on <ticker>", use `get_latest_report`
+    instead; only build a bespoke/custom single-ticker report with `generate_report`.
 
     `query` is natural language, e.g. "high-growth semis with rising estimates".
     `delivery` defaults to "email". Rate-limited to 20/hour per user server-side.
@@ -281,10 +268,12 @@ async def get_latest_report(
     cached report instantly — fast and cheap. ALWAYS prefer this over generating a
     report on the fly.
 
-    Do NOT use `generate_report` for an ordinary research request — that tool builds
-    a brand-new BESPOKE report on the fly (slow, async) and is ONLY for when the user
-    explicitly asks to CUSTOMIZE the report with specific line items, ratios, filing
-    frequency, or other overrides the cached report does not already cover.
+    Do NOT use `generate_report` for an ordinary research request — that tool is a LAST
+    RESORT (slow, async) for when this report is `missing` or the user explicitly wants a
+    CUSTOMIZED report (specific line items, ratios, filing frequency, or other overrides
+    the cached report does not already cover). If the user's intent is an OPEN-ENDED or
+    THEMATIC QUESTION rather than a request for this existing report, use
+    `generate_research_report` instead.
 
     Accepts one OR many symbols. Returns
     {"result": [{"symbol": "AAPL", "url": "<presigned pdf url>",
