@@ -7,10 +7,6 @@ tools for Claude (and any MCP client).
 It lets AI agents pull in real-time market events and research on demand, so they
 can surface the insights that matter most to you.
 
-It's a thin, stateless proxy over the backend's public HTTP API: it holds no
-credentials and only forwards the caller's bearer JWT, so the entire contract with
-the backend is an HTTP API + a JWT.
-
 ## Quick Install
 
 Add the connector to Claude Code
@@ -140,7 +136,7 @@ OAuth (it sends the password as a tool argument, so it lands in call logs):
 ```bash
 npx @modelcontextprotocol/inspector
 # Connect to http://localhost:8000/mcp with header Authorization: Bearer <JWT>
-# Confirm 5 tools list, then exercise:
+# Confirm the tools list loads (count varies by AUTH_MODE — legacy adds the 3 pre-auth tools), then exercise:
 #   list_realtime_events("eps_update")        -> events (or [])
 #   get_latest_report(["AAPL"])               -> presigned PDF url (or missing)  [default report path]
 #   generate_report("AAPL", overrides={...})  -> read ["AAPL"]["task_id"]  [bespoke only]
