@@ -549,6 +549,54 @@ async def predict_earnings_move(
         ctx, "POST", "/predict-earnings-announcement-move", json={"symbols" : symbols }, bearer_token=bearer_token
     )
 
+@mcp.tool()
+async def list_earnings_announcements(
+    ctx: Context,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    symbols: Optional[list[str]] = None,
+    industry: Optional[list[str]] = None,
+    sector: Optional[list[str]] = None,
+    market_cap: Optional[list[str]] = None,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """List scheduled earnings announcements within a date window, FlexReport names only.
+
+    `start_date` and `end_date` are `YYYY-MM-DD` strings; both default to today when
+    omitted (so omit them for "who reports today"). Anything the backend can't parse as
+    a date returns a 422 — do not pass other formats. Results are restricted to FlexReport's
+    covered universe, so symbols outside coverage are dropped silently.
+
+    Optional filters, all AND-ed together:
+    - `symbols`     -> limit to these tickers (e.g. ["AAPL","MSFT"]).
+    - `sector`      -> values from `list_report_options("sectors")`.
+    - `industry`    -> values from `list_sub_industries([...])`.
+    - `market_cap`  -> buckets like "Small-cap", "Medium-cap", "Large-cap", "Mega-cap".
+    `sector`, `industry`, and `market_cap` are validated against fixed enums server-side;
+    invalid values return a 422, so source them from the tools above rather than guessing.
+
+    Returns a list of announcement records (empty list when nothing matches).
+
+    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
+    retry. Omit only if the MCP client forwards an Authorization header.
+    """
+    body: dict[str, Any] = {}
+    if start_date:
+        body["start_date"] = start_date
+    if end_date:
+        body["end_date"] = end_date
+    if symbols:
+        body["symbols"] = symbols
+    if industry:
+        body["industry"] = industry
+    if sector:
+        body["sector"] = sector
+    if market_cap:
+        body["market_cap"] = market_cap
+    return await _send(
+        ctx, "POST", "/list-upcoming-earnings-announcements", json=body, bearer_token=bearer_token
+    )
+
 
 # --- Auth / registration --------------------------------------------------
 # Pre-auth flows (no JWT yet). See the server `instructions` for the full playbook.
