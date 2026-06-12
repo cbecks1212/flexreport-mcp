@@ -536,6 +536,19 @@ async def get_stock_picks(
         ctx, "GET", "/get-stock-picks", params=params, require_auth=False
     )
 
+@mcp.tool()
+async def predict_earnings_move(
+    ctx: Context,
+    symbols: list[str],
+    bearer_token: Optional[str] = None
+)-> Any:
+    """
+    Predict the magnitude of a stock's move, post-earnings announcement. Returns a list of possibilities, modelling the magnitude under each scenario e.g. if stock beats and raises guidance then expect a 6% magnitude move.
+    """
+    return await _send(
+        ctx, "POST", "/predict-earnings-announcement-move", json={"symbols" : symbols }, bearer_token=bearer_token
+    )
+
 
 # --- Auth / registration --------------------------------------------------
 # Pre-auth flows (no JWT yet). See the server `instructions` for the full playbook.
