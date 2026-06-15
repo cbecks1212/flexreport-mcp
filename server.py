@@ -306,6 +306,7 @@ _OPTION_ENDPOINTS = {
     "institutional_investor_types": "/list-institutional-investor-types",
     "countries": "/list-countries",
     "fiscal_quarter": "/get-fiscal-quarter",
+    "market_cap": "/list-marketcap-options",
 }
 
 
@@ -320,6 +321,7 @@ async def list_report_options(
         "institutional_investor_types",
         "countries",
         "fiscal_quarter",
+        "market_cap",
     ],
 ) -> Any:
     """Enumerate the valid values for a parameter, straight from the backend.
@@ -335,6 +337,8 @@ async def list_report_options(
                                         values for `generate_report`
     - "countries"                    -> covered countries
     - "fiscal_quarter"               -> the most recent fiscal quarter being reported
+    - "market_cap"                   -> valid `market_cap` buckets (Small-cap,
+                                        Medium-cap, Large-cap, Mega-cap)
 
     Authoritative and never stale: it reads the backend's live config, not a
     hardcoded list.
@@ -365,7 +369,6 @@ async def list_tickers(ctx: Context, with_names: bool = False) -> Any:
     """
     path = "/list-symbols-with-names" if with_names else "/list-tickers"
     return await _send(ctx, "GET", path, require_auth=False)
-
 
 @mcp.tool()
 async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
