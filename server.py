@@ -553,6 +553,131 @@ async def predict_earnings_move(
     )
 
 @mcp.tool()
+async def schedule_task(
+    ctx: Context,
+    task_name: str,
+    task_type: Literal["report", "screener", "research", "events"],
+    instructions: dict,
+    frequency: Literal["daily", "weekly", "monthly", "quarterly", "custom"] = "weekly",
+    regular_cron: Optional[str] = None,
+    custom_cron: Optional[str] = None,
+    bulk_subscribe: bool = False,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Schedule a RECURRING delivery (cron job) of a report, screen, research answer, or events.
+
+    Use this when the user wants something delivered ON A SCHEDULE / repeatedly
+    (e.g. "send me the AAPL report every Monday", "screen for cheap large-cap
+    industrials monthly", "email me eps updates each morning"). For a ONE-OFF
+    request, call the corresponding tool directly instead (get_latest_report /
+    generate_report, screen_stocks, generate_research_report, list_realtime_events).
+
+    `task_name` is a human label for the job (also its delete/lookup key).
+
+    `frequency` picks a preset cron: daily (08:00), weekly (Mon 08:00),
+    monthly (1st 08:00), quarterly (Jan/Apr/Jul/Oct 1st 08:00). For anything else
+    set frequency="custom" and supply ONE of:
+      - `regular_cron`  -> a raw 5-field cron expression ("30 6 * * 1-5"). Preferred
+                           when you already know the exact cron — used verbatim.
+      - `custom_cron`   -> a natural-language schedule ("every weekday at 6:30am"),
+                           which the backend converts to cron via an LLM.
+    Both are ignored unless frequency="custom"; if you pass both, `regular_cron`
+    wins. Exactly one is required when frequency="custom".
+
+    `task_type` selects WHAT gets delivered and the shape of `instructions`:
+
+    - "report"   -> recurring company report. instructions REQUIRES `ticker`; same
+                    optional override keys as `generate_report` (e.g.
+                    {"ticker": "AAPL", "include_transcript": false, "ratios": [...]}).
+    - "screener" -> recurring stock screen. instructions takes the same keys as
+                    `screen_stocks`: metrics, sectors, sub_sectors, market_cap,
+                    analyst_ratings, institutional_ownership, countries,
+                    price_performance (e.g. {"sectors": ["Technology"],
+                    "market_cap": ["Large-cap"]}).
+    - "research" -> recurring open-ended/thematic research. instructions REQUIRES
+                    `query`; optional `delivery` ("dashboard" or "email")
+                    (e.g. {"query": "high-growth semis with rising estimates",
+                    "delivery": "email"}).
+    - "events"   -> recurring earnings/market events. instructions takes the same
+                    keys as `list_realtime_events`: event_type (default
+                    "eps_update"), tickers, sector, industry, market_cap
+                    (e.g. {"event_type": "eps_update", "tickers": ["AAPL","MSFT"]}).
+
+    Discover valid values with the list tools (`list_report_options`,
+    `list_sub_industries`) rather than guessing; invalid enum values are rejected
+    server-side. `bulk_subscribe=True` subscribes a wider audience instead of just
+    the caller — leave it False unless the user explicitly asks.
+
+    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+    use the MCP client's configured Authorization header. Returns 201 on success.
+    """
+    if frequency == "custom" and not (regular_cron or custom_cron):
+        return {"error": "When frequency='custom', supply regular_cron (a 5-field "
+                         "cron expression) or custom_cron (a natural-language schedule)."}
+
+    # Pin each task_type to its distinguishing field so the backend's
+    # Union[Report, StockScreener, SearchQuery, EarningEvents] resolution can't
+    # drift to the wrong branch on a thin payload.
+    instr = dict(instructions or {})
+    if task_type == "events":
+        instr.setdefault("event_type", "eps_update")
+    elif task_type == "screener":
+        instr.setdefault("metrics", {})
+
+    body: dict[str, Any] = {
+        "frequency": frequency,
+        "instructions": instr,
+        "task_name": task_name,
+        "bulk_subscribe": bulk_subscribe,
+    }
+    if regular_cron:
+        body["regular_cron"] = regular_cron
+    if custom_cron:
+        body["custom_cron"] = custom_cron
+    return await _send(
+        ctx, "POST", "/schedule-task", json=body, bearer_token=bearer_token
+    )
+
+
+@mcp.tool()
+async def list_scheduled_tasks(
+    ctx: Context,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """List the caller's scheduled tasks (cron jobs created via `schedule_task`).
+
+    Returns only the authenticated user's jobs, each as
+    {"name", "active", "schedule" (cron string), "args", "kwargs", "enabled",
+     "last_run_at", "total_run_count"}. Use `name` as the key to remove a job with
+    `delete_scheduled_task`.
+
+    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+    use the MCP client's configured Authorization header.
+    """
+    return await _send(ctx, "GET", "/get-scheduled-tasks", bearer_token=bearer_token)
+
+
+@mcp.tool()
+async def delete_scheduled_task(
+    ctx: Context,
+    task_name: str,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Delete a scheduled task (cron job) by its name.
+
+    `task_name` is the `name` returned by `list_scheduled_tasks` (the same
+    `task_name` used when the job was created via `schedule_task`). Returns
+    {"msg": "<task_name> deleted"} on success, or an error if no such task exists.
+
+    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+    use the MCP client's configured Authorization header.
+    """
+    return await _send(
+        ctx, "DELETE", "/delete-scheduled-task",
+        params={"task_name": task_name}, bearer_token=bearer_token,
+    )
+
+@mcp.tool()
 async def list_earnings_announcements(
     ctx: Context,
     start_date: Optional[str] = None,
