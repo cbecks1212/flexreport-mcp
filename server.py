@@ -241,6 +241,44 @@ async def generate_research_report(
         json={"query": query, "delivery": delivery}, bearer_token=bearer_token,
     )
 
+
+@mcp.tool()
+async def explore_data_catalogue(
+    ctx: Context,
+    query: str,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Explore FlexReport's data platform with an OPEN-ENDED question — fast, interactive EDA.
+
+    ===> THE RIGHT TOOL for lightweight, EXPLORATORY data discovery: when the user wants
+    to poke at the data, get a feel for what FlexReport's platform covers, and see the
+    answer as INTERACTIVE CHARTS AND TABLES rather than a polished writeup. It validates
+    the request, plans queries against the data catalogue, runs them, and returns the raw
+    result sets for graphing/interpretation on the dashboard.
+
+    How this differs from `generate_research_report`: that tool composes a professional,
+    analyst-grade deep-dive (slow, ~10-12 min, email or dashboard). THIS tool is the
+    quick exploratory pass — use it to scope the data and iterate on questions, then,
+    once the user is satisfied with what they've found, route to `generate_research_report`
+    for the full deep-dive on the question they've settled on. Examples that fit here:
+    "what data do you have on semiconductor margins?", "show me revenue growth across
+    large-cap software", "which sectors have the most earnings revisions lately?".
+
+    `query` is natural language. Results are always delivered to the dashboard. The job
+    is rate-limited to 20/hour per user server-side.
+    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+    use the MCP client's configured Authorization header.
+
+    Asynchronous: returns {"task_id": "...", "status": "PENDING"}. Poll with
+    `get_task_status` until SUCCESS, then read its `result` (the query result sets to
+    render as charts/tables).
+    """
+    return await _send(
+        ctx, "POST", "/data-catalogue-exploration",
+        json={"query": query}, bearer_token=bearer_token,
+    )
+
+
 @mcp.tool()
 async def get_task_status(ctx: Context, task_id: str) -> Any:
     """Poll the status of an async job started by generate_report / generate_research_report.
