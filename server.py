@@ -228,6 +228,11 @@ async def generate_research_report(
     For a plain "get me the latest report/research on <ticker>", use `get_latest_report`
     instead; only build a bespoke/custom single-ticker report with `generate_report`.
 
+    If the user only wants to EXPLORE the data or "use FlexReport to explore...", do NOT
+    start here — call `explore_data_catalogue` first (fast, interactive charts/tables) and
+    reach for THIS deep-dive only later, once the user has reviewed the exploration and
+    EXPLICITLY asks for the full report. Never run both for the same question at once.
+
     `query` is natural language, e.g. "high-growth semis with rising estimates".
     `delivery` defaults to "email". Rate-limited to 20/hour per user server-side.
     `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
@@ -250,28 +255,37 @@ async def explore_data_catalogue(
 ) -> Any:
     """Explore FlexReport's data platform with an OPEN-ENDED question — fast, interactive EDA.
 
-    ===> THE RIGHT TOOL for lightweight, EXPLORATORY data discovery: when the user wants
-    to poke at the data, get a feel for what FlexReport's platform covers, and see the
-    answer as INTERACTIVE CHARTS AND TABLES rather than a polished writeup. It validates
-    the request, plans queries against the data catalogue, runs them, and returns the raw
-    result sets for graphing/interpretation on the dashboard.
+    ===> THE DEFAULT, FIRST-STEP tool whenever the user wants to EXPLORE the data, get a
+    feel for what FlexReport's platform covers, or understand a topic from the data
+    (e.g. "use FlexReport to explore...", "how are small caps doing — explore the data",
+    "what data do you have on semiconductor margins?"). It validates the request, plans
+    queries against the data catalogue, runs them, and returns the raw result sets to
+    render as INTERACTIVE CHARTS AND TABLES on the dashboard.
 
-    How this differs from `generate_research_report`: that tool composes a professional,
-    analyst-grade deep-dive (slow, ~10-12 min, email or dashboard). THIS tool is the
-    quick exploratory pass — use it to scope the data and iterate on questions, then,
-    once the user is satisfied with what they've found, route to `generate_research_report`
-    for the full deep-dive on the question they've settled on. Examples that fit here:
-    "what data do you have on semiconductor margins?", "show me revenue growth across
-    large-cap software", "which sectors have the most earnings revisions lately?".
+    *** RUN THIS BY ITSELF FIRST. DO NOT ALSO LAUNCH `generate_research_report` FOR THE
+    SAME QUESTION. *** These two tools are SEQUENTIAL STEPS, never parallel:
+      1. `explore_data_catalogue` (this tool) — the quick exploratory pass. Run it,
+         poll it, SHOW the user the resulting charts/tables, and let them iterate.
+      2. `generate_research_report` — the slow (~10-12 min), professional analyst-grade
+         deep-dive. Reach for it ONLY LATER, AFTER the user has seen the exploration and
+         EXPLICITLY asks for the full report. Firing both at once wastes a ~10-min job,
+         burns the 20/hour budget, and produces confusing duplicate polling.
+    There is no `delivery` argument here: results always go to the dashboard so the user
+    can interact with them. The job is rate-limited to 20/hour per user server-side.
 
-    `query` is natural language. Results are always delivered to the dashboard. The job
-    is rate-limited to 20/hour per user server-side.
-    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-    use the MCP client's configured Authorization header.
+    `query` is natural language. `bearer_token` (a JWT from `get_token`) authenticates as
+    that user; omit it to use the MCP client's configured Authorization header.
 
-    Asynchronous: returns {"task_id": "...", "status": "PENDING"}. Poll with
-    `get_task_status` until SUCCESS, then read its `result` (the query result sets to
-    render as charts/tables).
+    Asynchronous: returns {"task_id": "...", "status": "PENDING"}. Poll a SINGLE task
+    with `get_task_status` until SUCCESS (the result is a plain dict — there is NO nested
+    task to chase). On SUCCESS, `result` is:
+      {"user_query": "...", "delivery": "dashboard",
+       "results": {"<query name>": {"description": "...", "columns": [...],
+                                     "rows": [...up to 20 sample rows...],
+                                     "row_count": N}, ...}}
+    Render each entry as a chart/table for the user. If the request can't be served from
+    the platform's data, `result` instead carries a `validation_status` of "REJECTED"
+    (with a reason) — relay that rather than retrying blindly.
     """
     return await _send(
         ctx, "POST", "/data-catalogue-exploration",
