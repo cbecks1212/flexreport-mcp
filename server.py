@@ -171,45 +171,53 @@ async def list_realtime_events(
     return await _send(ctx, "POST", "/get-realtime-events", json=body, bearer_token=bearer_token)
 
 
-@mcp.tool()
-async def generate_report(
-    ctx: Context,
-    ticker: str,
-    overrides: Optional[dict] = None,
-    bearer_token: Optional[str] = None,
-) -> Any:
-    """Build a NEW BESPOKE report on the fly for one ticker (slow, async). LAST RESORT.
-
-    ===> This is a LAST-RESORT tool, NOT the default. Reach for it ONLY when EITHER:
-      (a) `get_latest_report` has no cached report for the ticker (it came back in
-          `missing`), so there is nothing pre-built to return, OR
-      (b) the user EXPLICITLY wants to CUSTOMIZE the report with specific line items,
-          ratios, filing frequency, institutional-ownership cuts, or other `overrides`
-          that the cached report does not already cover.
-
-    DO NOT use this for an ordinary "get me the report / research / analysis" request —
-    use `get_latest_report` instead, which returns the pre-built cached report instantly.
-    For an open-ended or thematic QUESTION (about a ticker or the broader market), use
-    `generate_research_report` instead. This tool kicks off a slow, asynchronous build.
-
-    Only `ticker` is required; the backend applies sensible defaults for everything
-    else. Pass `overrides` to customize the report (e.g.
-    {"include_transcript": false, "ratios": [...], "filing_frequency": "annual"}).
-    Discover valid override values with `list_report_options`: "financial_items"
-    and "financial_ratios" for the line items/ratios, and
-    "institutional_investor_types" for `overrides.institutional_ownership`.
-
-    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-    use the MCP client's configured Authorization header.
-
-    This is asynchronous. The response is keyed by ticker, e.g.
-    {"AAPL": {"task_id": "...", "status": "PENDING"}}. Read result["AAPL"]["task_id"]
-    and poll it with `get_task_status` until status is SUCCESS.
-    """
-    payload = {"ticker": ticker, **(overrides or {})}
-    return await _send(
-        ctx, "POST", "/create-full-report", json=payload, bearer_token=bearer_token
-    )
+# --- generate_report: DISABLED (intentionally not registered as an MCP tool) ---
+# Commented out on purpose. This on-the-fly bespoke report builder overlapped with
+# get_latest_report / generate_research_report / explore_data_catalogue and was a
+# frequent source of mis-routing — agents reached for it instead of the exploratory
+# or deep-dive paths. It is effectively an internal operations endpoint right now, so
+# we no longer advertise it to clients. The backend `/create-full-report` endpoint is
+# unchanged; re-enable by uncommenting the decorator + function below.
+#
+# @mcp.tool()
+# async def generate_report(
+#     ctx: Context,
+#     ticker: str,
+#     overrides: Optional[dict] = None,
+#     bearer_token: Optional[str] = None,
+# ) -> Any:
+#     """Build a NEW BESPOKE report on the fly for one ticker (slow, async). LAST RESORT.
+#
+#     ===> This is a LAST-RESORT tool, NOT the default. Reach for it ONLY when EITHER:
+#       (a) `get_latest_report` has no cached report for the ticker (it came back in
+#           `missing`), so there is nothing pre-built to return, OR
+#       (b) the user EXPLICITLY wants to CUSTOMIZE the report with specific line items,
+#           ratios, filing frequency, institutional-ownership cuts, or other `overrides`
+#           that the cached report does not already cover.
+#
+#     DO NOT use this for an ordinary "get me the report / research / analysis" request —
+#     use `get_latest_report` instead, which returns the pre-built cached report instantly.
+#     For an open-ended or thematic QUESTION (about a ticker or the broader market), use
+#     `generate_research_report` instead. This tool kicks off a slow, asynchronous build.
+#
+#     Only `ticker` is required; the backend applies sensible defaults for everything
+#     else. Pass `overrides` to customize the report (e.g.
+#     {"include_transcript": false, "ratios": [...], "filing_frequency": "annual"}).
+#     Discover valid override values with `list_report_options`: "financial_items"
+#     and "financial_ratios" for the line items/ratios, and
+#     "institutional_investor_types" for `overrides.institutional_ownership`.
+#
+#     `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+#     use the MCP client's configured Authorization header.
+#
+#     This is asynchronous. The response is keyed by ticker, e.g.
+#     {"AAPL": {"task_id": "...", "status": "PENDING"}}. Read result["AAPL"]["task_id"]
+#     and poll it with `get_task_status` until status is SUCCESS.
+#     """
+#     payload = {"ticker": ticker, **(overrides or {})}
+#     return await _send(
+#         ctx, "POST", "/create-full-report", json=payload, bearer_token=bearer_token
+#     )
 
 
 @mcp.tool()
@@ -226,7 +234,8 @@ async def generate_research_report(
     theme not tied to one company (e.g. "Are large caps driving earnings season?",
     "What's the bull/bear case on NVDA?", "high-growth semis with rising estimates").
     For a plain "get me the latest report/research on <ticker>", use `get_latest_report`
-    instead; only build a bespoke/custom single-ticker report with `generate_report`.
+    instead. This is the slow, professional DEEP-DIVE — reach for it only when the user
+    EXPLICITLY asks for a full writeup, not for an ordinary exploratory question.
 
     If the user only wants to EXPLORE the data or "use FlexReport to explore...", do NOT
     start here — call `explore_data_catalogue` first (fast, interactive charts/tables) and
@@ -295,7 +304,7 @@ async def explore_data_catalogue(
 
 @mcp.tool()
 async def get_task_status(ctx: Context, task_id: str) -> Any:
-    """Poll the status of an async job started by generate_report / generate_research_report.
+    """Poll the status of an async job (generate_research_report, explore_data_catalogue, screen_stocks, ...).
 
     Returns {"task_id": ..., "status": ..., "result": ...}. `status` is one of
     PENDING, SUCCESS, FAILURE, RETRY. `result` is populated once status is SUCCESS.
@@ -320,12 +329,10 @@ async def get_latest_report(
     cached report instantly — fast and cheap. ALWAYS prefer this over generating a
     report on the fly.
 
-    Do NOT use `generate_report` for an ordinary research request — that tool is a LAST
-    RESORT (slow, async) for when this report is `missing` or the user explicitly wants a
-    CUSTOMIZED report (specific line items, ratios, filing frequency, or other overrides
-    the cached report does not already cover). If the user's intent is an OPEN-ENDED or
-    THEMATIC QUESTION rather than a request for this existing report, use
-    `generate_research_report` instead.
+    If the user's intent is an OPEN-ENDED or exploratory QUESTION rather than a request
+    for this existing report, do NOT use this tool — default to `explore_data_catalogue`
+    (fast, interactive), and reach for `generate_research_report` only when the user
+    EXPLICITLY asks for a full deep-dive writeup.
 
     Accepts one OR many symbols. Returns
     {"result": [{"symbol": "AAPL", "url": "<presigned pdf url>",
@@ -335,8 +342,8 @@ async def get_latest_report(
     to download/open the document directly (and prefer it on clients that can't
     handle a large base64 blob); `report` is the inline base64 PDF — decode it to
     read, render, or summarize the report's contents yourself. `missing` lists
-    symbols with no cached report (for those, the user may want `generate_report`
-    or `onboard_symbol`). Symbols are normalized (uppercased, de-duplicated) by
+    symbols with no cached report (for those, the user may want `onboard_symbol`
+    to add coverage). Symbols are normalized (uppercased, de-duplicated) by
     the backend.
     `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
     use the MCP client's configured Authorization header.
@@ -382,11 +389,12 @@ async def list_report_options(
 
     - "event_types"                  -> valid `event_type` for `list_realtime_events`
                                         (eps_update, company_update, biggest_mover, ...)
-    - "financial_items"              -> line items usable in a report's `overrides`
-    - "financial_ratios"             -> ratios usable in `overrides.ratios`
+    - "financial_items"              -> line items usable in a scheduled report's
+                                        `overrides` (schedule_task task_type="report")
+    - "financial_ratios"             -> ratios usable in those `overrides.ratios`
     - "sectors"                      -> valid `sector` filter values
     - "institutional_investor_types" -> valid `overrides.institutional_ownership`
-                                        values for `generate_report`
+                                        values for a scheduled report
     - "countries"                    -> covered countries
     - "fiscal_quarter"               -> the most recent fiscal quarter being reported
     - "market_cap"                   -> valid `market_cap` buckets (Small-cap,
@@ -621,8 +629,9 @@ async def schedule_task(
     Use this when the user wants something delivered ON A SCHEDULE / repeatedly
     (e.g. "send me the AAPL report every Monday", "screen for cheap large-cap
     industrials monthly", "email me eps updates each morning"). For a ONE-OFF
-    request, call the corresponding tool directly instead (get_latest_report /
-    generate_report, screen_stocks, generate_research_report, list_realtime_events).
+    request, call the corresponding tool directly instead (get_latest_report,
+    screen_stocks, generate_research_report, explore_data_catalogue,
+    list_realtime_events).
 
     `task_name` is a human label for the job (also its delete/lookup key).
 
@@ -638,9 +647,11 @@ async def schedule_task(
 
     `task_type` selects WHAT gets delivered and the shape of `instructions`:
 
-    - "report"   -> recurring company report. instructions REQUIRES `ticker`; same
-                    optional override keys as `generate_report` (e.g.
-                    {"ticker": "AAPL", "include_transcript": false, "ratios": [...]}).
+    - "report"   -> recurring company report. instructions REQUIRES `ticker`; optional
+                    override keys customize it — line items, ratios, filing frequency,
+                    institutional-ownership cuts (discover valid values with
+                    `list_report_options`), e.g.
+                    {"ticker": "AAPL", "include_transcript": false, "ratios": [...]}.
     - "screener" -> recurring stock screen. instructions takes the same keys as
                     `screen_stocks`: metrics, sectors, sub_sectors, market_cap,
                     analyst_ratings, institutional_ownership, countries,
@@ -823,8 +834,8 @@ async def get_token(ctx: Context, username: str, password: str) -> Any:
 
     Returns {"access_token": "<jwt>", "token_type": "bearer"}. Pass the
     `access_token` as the `bearer_token` argument on every authenticated tool
-    (list_realtime_events, get_latest_report, generate_report,
-    generate_research_report, onboard_symbol). Re-call this and retry on a 401.
+    (list_realtime_events, get_latest_report, generate_research_report,
+    explore_data_catalogue, onboard_symbol). Re-call this and retry on a 401.
 
     Note: `password` is sent as a tool argument, so it appears in call logs.
     """

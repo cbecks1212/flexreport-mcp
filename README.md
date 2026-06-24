@@ -25,9 +25,9 @@ make it available in every directory. See [Auth](#auth) for details.
 | Tool | Backend endpoint | What it does |
 |---|---|---|
 | `list_realtime_events(event_type, tickers, sector, industry, market_cap)` | `POST /get-realtime-events` | Pull live events (EPS updates, transcripts, ratings, …) from the 12h cache |
-| `get_latest_report(symbols)` | `POST /get-cached-reports` | **Default report tool** — get the latest pre-built cached report(s) for one or more tickers, instantly, as short-lived presigned PDF download URLs, + a `missing` list |
-| `generate_report(ticker, overrides)` | `POST /create-full-report` | Build a **bespoke** report on the fly (slow, async) — only when the user wants custom line items/ratios/overrides → `{ticker: {task_id, status}}` |
-| `generate_research_report(query, delivery)` | `POST /generate-research-report` | Start a report job from a plain-English query → `{task_id, status}` |
+| `get_latest_report(symbols)` | `POST /get-cached-reports` | Get the latest pre-built cached report(s) for one or more **named** tickers, instantly, as short-lived presigned PDF download URLs, + a `missing` list |
+| `explore_data_catalogue(query)` | `POST /data-catalogue-exploration` | **Default route** — fast, interactive EDA against the data platform → result sets to render as charts/tables (dashboard only, 20/hour) → `{task_id, status}` |
+| `generate_research_report(query, delivery)` | `POST /generate-research-report` | **Deep dive** (~10-12 min, async) — analyst-grade writeup, only when the user explicitly asks for a full report → `{task_id, status}` |
 | `get_task_status(task_id)` | `GET /task-status` | Poll an async job to `SUCCESS` and read its `result` |
 | `get_stock_picks(strategy_name)` | `GET /get-stock-picks` | Latest LLM-selected stock picks for the current rebalance (optionally one strategy) |
 | `list_report_options(kind)` | `GET /list-realtime-event-options`, `/list-financial-items`, `/list-financial-ratios`, `/get-sectors`, `/list-institutional-investor-types`, `/list-countries`, `/get-fiscal-quarter` | Enumerate valid values for a parameter (event types, ratios, sectors, investor types, countries, fiscal quarter) |
@@ -39,7 +39,9 @@ make it available in every directory. See [Auth](#auth) for details.
 | `confirm_registration(token)` | `GET /confirm/{token}` | Confirm a registration with the emailed token (pre-auth, **`AUTH_MODE=legacy` only**) |
 | `get_token(username, password)` | `POST /token` | Exchange credentials for a bearer JWT (OAuth2 password flow, pre-auth, **`AUTH_MODE=legacy` only**) |
 
-Typical agent loop: for a research request, just call `get_latest_report(symbols)` to fetch the cached report instantly. Only when the user wants a customized report: **generate** it (`generate_report`) → **poll** status (`get_task_status`).
+Typical agent loop: default to `explore_data_catalogue(query)` for open-ended/exploratory questions (fast, interactive charts/tables). Escalate only on a crystal-clear intent — `get_latest_report(symbols)` for the existing report on a named ticker, `screen_stocks(...)` to filter the universe, or `generate_research_report(query)` for an explicit deep dive (~10-12 min, async — **poll** with `get_task_status`).
+
+> **Note:** `generate_report` (bespoke on-the-fly `POST /create-full-report`) is currently **commented out** in `server.py` — it overlapped with the routes above and caused mis-routing. The backend endpoint is unchanged; re-enable by uncommenting the tool.
 
 Auth resolution per call: explicit `bearer_token` arg → the inbound `Authorization` header.
 
@@ -138,8 +140,8 @@ npx @modelcontextprotocol/inspector
 # Connect to http://localhost:8000/mcp with header Authorization: Bearer <JWT>
 # Confirm the tools list loads (count varies by AUTH_MODE — legacy adds the 3 pre-auth tools), then exercise:
 #   list_realtime_events("eps_update")        -> events (or [])
-#   get_latest_report(["AAPL"])               -> presigned PDF url (or missing)  [default report path]
-#   generate_report("AAPL", overrides={...})  -> read ["AAPL"]["task_id"]  [bespoke only]
+#   get_latest_report(["AAPL"])               -> presigned PDF url (or missing)  [named-ticker report]
+#   explore_data_catalogue("MU EPS growth last 8 quarters")  -> task_id  [default exploratory route]
 #   get_task_status(task_id)                  -> eventually SUCCESS
 # Negative: call any JWT tool with no token   -> clean {"error": ...}, no crash
 ```
