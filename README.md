@@ -35,6 +35,8 @@ make it available in every directory. See [Auth](#auth) for details.
 | `list_tickers(with_names)` | `GET /list-tickers` or `/list-symbols-with-names` | The covered ticker universe (optionally with company names) |
 | `get_company_snapshot(symbol)` | `GET /get-company-snapshot` | Structured snapshot: thesis, fundamentals, technicals, price targets, ownership, grades |
 | `detect_intraday_outlier_jumps(symbol, zscore_threshold)` | `GET /detect-intraday-outlier-jumps` | Live look at today's 1-min tape; flags minutes whose move is a daily-sigma outlier (synchronous, authed) |
+| `get_aftermarket_trades(symbols, start_datetime, end_datetime)` | `POST /get-aftermarket-trades` | Query **stored** extended-hours trade ticks for symbols over an ET datetime range (defaults to today, authed, 300/min) |
+| `get_aftermarket_quotes(symbols, start_datetime, end_datetime)` | `POST /get-aftermarket-quotes` | Query **stored** extended-hours bid/ask quote ticks for symbols over an ET datetime range (defaults to today, authed, 300/min) |
 | `onboard_symbol(symbol)` | `POST /onboard-symbol` | Request onboarding of an uncovered ticker (async, authed, 5/hour) |
 | `register_user(email, password)` | `POST /auth` | Register for an API key; backend emails a confirmation token (pre-auth, **`AUTH_MODE=legacy` only**) |
 | `confirm_registration(token)` | `GET /confirm/{token}` | Confirm a registration with the emailed token (pre-auth, **`AUTH_MODE=legacy` only**) |
