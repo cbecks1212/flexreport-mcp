@@ -446,6 +446,35 @@ async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
 
 
 @mcp.tool()
+async def detect_intraday_outlier_jumps(
+    ctx: Context,
+    symbol: str,
+    zscore_threshold: float = 2.0,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Live look at TODAY's 1-minute intraday tape, flagging outlier price jumps.
+
+    Pulls today's one-minute bars for `symbol` (US/Eastern trading day) live and flags
+    each minute whose move is a statistical outlier versus the stock's own daily-return
+    volatility — i.e. minutes where |z-score| of the move exceeds `zscore_threshold`.
+    Use it for a quick "is the stock making an abnormal intraday move right now?" read.
+
+    `zscore_threshold` (default 2.0) is the daily-sigma cutoff: higher = stricter (fewer,
+    more extreme flags), lower = more sensitive. Synchronous — returns the flagged minutes
+    directly (no task id to poll). Returns a 404-style error if no intraday data is
+    available yet (e.g. before the market opens or for an uncovered symbol).
+
+    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and retry.
+    Omit only if the MCP client forwards an Authorization header.
+    """
+    return await _send(
+        ctx, "GET", "/detect-intraday-outlier-jumps",
+        params={"symbol": symbol, "zscore_threshold": zscore_threshold},
+        bearer_token=bearer_token,
+    )
+
+
+@mcp.tool()
 async def onboard_symbol(
     ctx: Context,
     symbol: str,
