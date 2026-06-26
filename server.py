@@ -446,6 +446,60 @@ async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
 
 
 @mcp.tool()
+async def list_technical_indicators(
+    ctx: Context,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """List the technical indicators available via `get_technical_indicator_data`.
+
+    Returns bare indicator names (e.g. "rsi", "macd", "sma_50") — the names accepted
+    as the `indicator` argument to `get_technical_indicator_data`. Call this FIRST to
+    discover valid values instead of guessing; an unknown indicator there returns a 400
+    listing the valid set.
+
+    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
+    retry. Omit only if the MCP client forwards an Authorization header.
+    """
+    return await _send(
+        ctx, "GET", "/list-technical-indicators", bearer_token=bearer_token
+    )
+
+
+@mcp.tool()
+async def get_technical_indicator_data(
+    ctx: Context,
+    symbol: str,
+    indicator: str,
+    start_date: str,
+    end_date: str,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Fetch a historical technical-indicator series for a symbol over a date range.
+
+    `indicator` must be one of the names from `list_technical_indicators` (call it
+    first). `start_date` and `end_date` are inclusive and must be "YYYY-MM-DD".
+    `symbol` is validated against the covered universe (`list_tickers`); an unknown
+    symbol returns 404 and an unknown indicator returns 400 listing valid values.
+
+    Returns a list of daily records (each row's columns vary by indicator), ordered by
+    date, or an empty list when there's no data in the range.
+
+    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
+    retry. Omit only if the MCP client forwards an Authorization header.
+    """
+    return await _send(
+        ctx, "GET", "/technical-indicator-endpoint",
+        params={
+            "symbol": symbol,
+            "indicator": indicator,
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        bearer_token=bearer_token,
+    )
+
+
+@mcp.tool()
 async def detect_intraday_outlier_jumps(
     ctx: Context,
     symbol: str,
