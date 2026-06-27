@@ -7,6 +7,7 @@ plan quota, and rate limits. This service holds no credentials and does not touc
 AWS/Redis/DB or import anything from the API repo.
 """
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -95,6 +96,7 @@ async def _send(
     *,
     require_auth: bool = True,
     bearer_token: Optional[str] = None,
+    raw: bool = False,
     **kwargs: Any,
 ) -> Any:
     """Forward a request to the backend, returning parsed JSON or a structured error.
@@ -102,6 +104,9 @@ async def _send(
     Auth (handled by auth_headers): explicit `bearer_token` (a JWT from `get_token`)
     → the inbound Authorization header. On a 401 the message tells the agent to
     re-authenticate with `get_token`.
+
+    With `raw=True`, a 2xx response's body is returned as bytes (for binary endpoints
+    like a PDF download) instead of being parsed as JSON.
 
     Errors (missing auth, transport failure, non-2xx) are returned as a dict with
     an "error" key rather than raised, so the agent receives a clean, readable message.
@@ -127,6 +132,9 @@ async def _send(
         if resp.status_code == 401:
             msg += " — not authenticated / token expired. Call `get_token` and pass the result as `bearer_token`."
         return {"error": msg, "detail": detail}
+
+    if raw:
+        return resp.content
 
     try:
         return resp.json()
@@ -351,6 +359,45 @@ async def get_latest_report(
     return await _send(
         ctx, "POST", "/get-cached-reports", json=symbols, bearer_token=bearer_token
     )
+
+
+@mcp.tool()
+async def download_pdf_from_url(
+    ctx: Context,
+    url: str,
+    file_name: str,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Fetch a presigned S3 PDF URL server-side and return the document as base64.
+
+    Use this to pull the actual PDF bytes for a presigned S3 link — e.g. the `url`
+    returned by `get_latest_report` — on clients that can't open the link directly and
+    need the document inline. The backend fetches the URL for you (clients never have
+    to reach S3) and streams the PDF back. Only S3 URLs are accepted: the host must end
+    in "amazonaws.com" and contain "s3"; any other host is rejected with a 400 (SSRF
+    guard). NOTE: if you already have `get_latest_report`'s `report` field (the same PDF
+    inline as base64), use that directly — there's no need to call this.
+
+    `url` is the presigned S3 link; `file_name` is the download filename to label the
+    document (e.g. "AAPL.pdf"). Returns
+    {"file_name": ..., "media_type": "application/pdf", "report": "<base64 pdf>"} —
+    decode `report` to read, render, or save the PDF.
+
+    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
+    retry. Omit only if the MCP client forwards an Authorization header.
+    """
+    pdf = await _send(
+        ctx, "POST", "/download-pdf-from-url",
+        json={"url": url, "file_name": file_name},
+        bearer_token=bearer_token, raw=True,
+    )
+    if isinstance(pdf, dict):  # _send returned a structured error, pass it through
+        return pdf
+    return {
+        "file_name": file_name,
+        "media_type": "application/pdf",
+        "report": base64.b64encode(pdf).decode("ascii"),
+    }
 
 
 # --- Discovery / metadata tools -------------------------------------------
