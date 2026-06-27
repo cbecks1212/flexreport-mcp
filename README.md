@@ -26,6 +26,7 @@ make it available in every directory. See [Auth](#auth) for details.
 |---|---|---|
 | `list_realtime_events(event_type, tickers, sector, industry, market_cap)` | `POST /get-realtime-events` | Pull live events (EPS updates, transcripts, ratings, …) from the 12h cache |
 | `get_latest_report(symbols)` | `POST /get-cached-reports` | Get the latest pre-built cached report(s) for one or more **named** tickers, instantly, as short-lived presigned PDF download URLs, + a `missing` list |
+| `download_pdf_from_url(url, file_name)` | `POST /download-pdf-from-url` | Fetch a presigned **S3** PDF URL server-side (SSRF-guarded) and return it inline as base64 — e.g. a `get_latest_report` `url` on clients that can't open the link (authed) |
 | `explore_data_catalogue(query)` | `POST /data-catalogue-exploration` | **Default route** — fast, interactive EDA against the data platform → result sets to render as charts/tables (dashboard only, 20/hour) → `{task_id, status}` |
 | `generate_research_report(query, delivery)` | `POST /generate-research-report` | **Deep dive** (~10-12 min, async) — analyst-grade writeup, only when the user explicitly asks for a full report → `{task_id, status}` |
 | `get_task_status(task_id)` | `GET /task-status` | Poll an async job to `SUCCESS` and read its `result` |
