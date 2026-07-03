@@ -479,12 +479,28 @@ async def list_tickers(ctx: Context, with_names: bool = False) -> Any:
 
 @mcp.tool()
 async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
-    """Fetch a structured company snapshot — no report generation needed.
+    """Fetch a structured, POINT-IN-TIME company snapshot — no report generation needed.
 
     Returns thesis/bull/bear, financial overview (Piotroski, valuation signal),
     price performance + technical indicators, price targets, institutional
     ownership, and analyst grades for `symbol`. Synchronous and cheap — prefer
-    this for a quick read instead of generating a full PDF report.
+    this for a quick CURRENT read instead of generating a full PDF report.
+
+    *** POINT-IN-TIME ONLY — THIS IS NOT A TIME SERIES. *** It captures where the
+    company stands right now, not how it got there. Do NOT use it to answer
+    temporal / trend / "over time" questions (e.g. "how has X evolved over the
+    past year", "quarter-over-quarter trend", "activity over the last 12 months",
+    "since ..."). Each block is an independently-sourced current cut with its own
+    as-of date (e.g. the institutional-ownership block is the latest 13F holder
+    snapshot), so the blocks are NOT a comparable historical series — reading a
+    trend off them, or treating two blocks' as-of dates as the same instant,
+    produces spurious results. For anything time-series, historical, or
+    "how did this change", use `explore_data_catalogue` instead.
+
+    Scope caveat: the snapshot is a FIXED set of current blocks, not the full
+    catalogue. Absence of a data domain HERE does NOT mean FlexReport lacks it —
+    do not infer coverage gaps from this tool. Route any coverage or
+    "do you have data on ..." question to `explore_data_catalogue`.
     """
     return await _send(
         ctx, "GET", "/get-company-snapshot",
