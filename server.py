@@ -480,15 +480,17 @@ async def list_tickers(ctx: Context, with_names: bool = False) -> Any:
 
 @mcp.tool()
 async def list_pdf_options(ctx: Context) -> Any:
-    """Return the catalogue of valid `document_structure` tags for the PDF builders.
+    """Return the complete, current `document_structure` tag catalogue for the PDF builders.
 
-    Call this BEFORE `build_pdf` or `build_pdf_full_width` — do not guess the
-    structure. The response documents the report DSL: every supported block tag
-    (sidebar/main paragraphs, tables, bullet lists, line & bar charts, KPI stat
-    cards, pre-rendered figures, images, dividers), each tag's payload shape with
-    an example, usage rules (key naming, ordering, markdown support, chart data
-    format), and a complete example `document_structure`. Public — no auth
-    required.
+    Call this BEFORE your first `build_pdf` / `build_pdf_full_width` — do not
+    guess the structure. The response documents the report DSL straight from the
+    backend: every supported block tag (sidebar/main paragraphs, tables, bullet
+    lists, line & bar charts, stacked multi-panel TA charts, KPI stat cards,
+    pre-rendered figures, images, dividers), each tag's payload shape with a
+    worked example, usage rules (key naming, ordering, markdown support, chart
+    data format), and a complete example `document_structure`. Authoritative and
+    never stale — it reads the backend's live catalogue, not a hardcoded copy.
+    Public — no auth required.
     """
     return await _send(ctx, "GET", "/list-pdf-tag-options", require_auth=False)
 
@@ -508,9 +510,19 @@ async def build_pdf(
     page: include `_sidebar`-tagged blocks to fill it (keep sidebar content to one
     page; it does not paginate) and `_main`-tagged blocks for the paginated body.
 
-    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10). Returns
-    {"pdf_base64": "<base64-encoded PDF>"} — decode it to save or render the file.
-    For a full-width report with no sidebar rail, use `build_pdf_full_width`.
+    For charts, PREFER DATA OVER PIXELS: send raw series through the native chart
+    tags (line/bar, or a 'multi_panel' item under line_chart_two_main for stacked
+    price/RSI/MACD-style panels) and let the backend render them — a few KB of
+    JSON instead of a large base64 image. Only use a figure tag for an image you
+    already hold verbatim: hand-built base64 risks corruption in transit, and an
+    unreadable image degrades to blank space instead of failing the build.
+
+    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10).
+    Synchronous — returns {"pdf_base64": "<base64-encoded PDF>", "warnings": [...]}.
+    Decode `pdf_base64` to save or render the file, and CHECK `warnings`: a
+    non-empty list means one or more blocks (usually a figure/image) were dropped
+    or rendered degraded. For a full-width report with no sidebar rail, use
+    `build_pdf_full_width`.
 
     Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
     retry. Omit only if the MCP client forwards an Authorization header.
@@ -540,8 +552,15 @@ async def build_pdf_full_width(
     memo-style, full-width documents; prefer `build_pdf` when the report calls
     for a sidebar rail (rating, price target, key stats).
 
-    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10). Returns
-    {"pdf_base64": "<base64-encoded PDF>"} — decode it to save or render the file.
+    For charts, PREFER DATA OVER PIXELS: send raw series through the native chart
+    tags (line/bar, or a 'multi_panel' item under line_chart_two_main) rather than
+    embedding hand-built base64 images via figure tags — large base64 risks
+    corruption in transit, and an unreadable image degrades to blank space.
+
+    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10).
+    Synchronous — returns {"pdf_base64": "<base64-encoded PDF>", "warnings": [...]}.
+    Decode `pdf_base64` to save or render the file, and CHECK `warnings`: a
+    non-empty list means one or more blocks were dropped or rendered degraded.
 
     Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
     retry. Omit only if the MCP client forwards an Authorization header.
