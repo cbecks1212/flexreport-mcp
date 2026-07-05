@@ -477,6 +477,49 @@ async def list_tickers(ctx: Context, with_names: bool = False) -> Any:
     path = "/list-symbols-with-names" if with_names else "/list-tickers"
     return await _send(ctx, "GET", path, require_auth=False)
 
+
+@mcp.tool()
+async def list_pdf_options(ctx: Context) -> Any:
+    """Return the catalogue of valid `document_structure` tags for `build_pdf`.
+
+    Call this BEFORE `build_pdf` — do not guess the structure. The response
+    documents the report DSL: every supported block tag (sidebar/main paragraphs,
+    tables, bullet lists, line & bar charts, KPI stat cards, images, dividers),
+    each tag's payload shape with an example, usage rules (key naming, ordering,
+    markdown support, chart data format), and a complete example
+    `document_structure`. Public — no auth required.
+    """
+    return await _send(ctx, "GET", "/list-pdf-tag-options", require_auth=False)
+
+
+@mcp.tool()
+async def build_pdf(
+    ctx: Context,
+    document_structure: dict,
+    font: str = "Times-Roman",
+    font_size: int = 10,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Render a tagged `document_structure` into a professional PDF report.
+
+    `document_structure` must follow the tag DSL from `list_pdf_options` — call
+    that first. The report is letter-size with a fixed left sidebar rail on every
+    page: include `_sidebar`-tagged blocks to fill it (keep sidebar content to one
+    page; it does not paginate) and `_main`-tagged blocks for the paginated body.
+
+    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10). Returns
+    {"pdf_base64": "<base64-encoded PDF>"} — decode it to save or render the file.
+
+    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
+    retry. Omit only if the MCP client forwards an Authorization header.
+    """
+    return await _send(
+        ctx, "POST", "/create-pdf-sidebar",
+        json={"document_structure": document_structure, "font": font, "font_size": font_size},
+        bearer_token=bearer_token,
+    )
+
+
 @mcp.tool()
 async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
     """Fetch a structured, POINT-IN-TIME company snapshot — no report generation needed.
