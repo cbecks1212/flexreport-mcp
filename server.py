@@ -480,14 +480,15 @@ async def list_tickers(ctx: Context, with_names: bool = False) -> Any:
 
 @mcp.tool()
 async def list_pdf_options(ctx: Context) -> Any:
-    """Return the catalogue of valid `document_structure` tags for `build_pdf`.
+    """Return the catalogue of valid `document_structure` tags for the PDF builders.
 
-    Call this BEFORE `build_pdf` — do not guess the structure. The response
-    documents the report DSL: every supported block tag (sidebar/main paragraphs,
-    tables, bullet lists, line & bar charts, KPI stat cards, images, dividers),
-    each tag's payload shape with an example, usage rules (key naming, ordering,
-    markdown support, chart data format), and a complete example
-    `document_structure`. Public — no auth required.
+    Call this BEFORE `build_pdf` or `build_pdf_full_width` — do not guess the
+    structure. The response documents the report DSL: every supported block tag
+    (sidebar/main paragraphs, tables, bullet lists, line & bar charts, KPI stat
+    cards, pre-rendered figures, images, dividers), each tag's payload shape with
+    an example, usage rules (key naming, ordering, markdown support, chart data
+    format), and a complete example `document_structure`. Public — no auth
+    required.
     """
     return await _send(ctx, "GET", "/list-pdf-tag-options", require_auth=False)
 
@@ -509,12 +510,44 @@ async def build_pdf(
 
     `font`/`font_size` set the base body style (e.g. "Times-Roman", 10). Returns
     {"pdf_base64": "<base64-encoded PDF>"} — decode it to save or render the file.
+    For a full-width report with no sidebar rail, use `build_pdf_full_width`.
 
     Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
     retry. Omit only if the MCP client forwards an Authorization header.
     """
     return await _send(
         ctx, "POST", "/create-pdf-sidebar",
+        json={"document_structure": document_structure, "font": font, "font_size": font_size},
+        bearer_token=bearer_token,
+    )
+
+
+@mcp.tool()
+async def build_pdf_full_width(
+    ctx: Context,
+    document_structure: dict,
+    font: str = "Times-Roman",
+    font_size: int = 10,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Render a tagged `document_structure` into a full-width PDF (no sidebar rail).
+
+    Same tag DSL and engine as `build_pdf` — call `list_pdf_options` first — but
+    the page is a single letter-size column: there is no sidebar rail,
+    `_sidebar`-tagged blocks flow inline with everything else, and tag suffixes
+    are optional (bare legacy tags like paragraph/table/line_chart are accepted).
+    Blocks render in key insertion order and paginate normally. Use this for
+    memo-style, full-width documents; prefer `build_pdf` when the report calls
+    for a sidebar rail (rating, price target, key stats).
+
+    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10). Returns
+    {"pdf_base64": "<base64-encoded PDF>"} — decode it to save or render the file.
+
+    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
+    retry. Omit only if the MCP client forwards an Authorization header.
+    """
+    return await _send(
+        ctx, "POST", "/create-pdf",
         json={"document_structure": document_structure, "font": font, "font_size": font_size},
         bearer_token=bearer_token,
     )
