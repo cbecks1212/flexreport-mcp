@@ -482,8 +482,8 @@ async def list_tickers(ctx: Context, with_names: bool = False) -> Any:
 async def list_pdf_options(ctx: Context) -> Any:
     """Return the complete, current `document_structure` tag catalogue for the PDF builders.
 
-    Call this BEFORE your first `build_pdf` / `build_pdf_full_width` — do not
-    guess the structure. The response documents the report DSL straight from the
+    Call this BEFORE your first `build_pdf_full_width` / `build_pdf_sidebar` — do
+    not guess the structure. The response documents the report DSL straight from the
     backend: every supported block tag (sidebar/main paragraphs, tables, bullet
     lists, line & bar charts, stacked multi-panel TA charts, KPI stat cards,
     pre-rendered figures, images, dividers), each tag's payload shape with a
@@ -496,19 +496,27 @@ async def list_pdf_options(ctx: Context) -> Any:
 
 
 @mcp.tool()
-async def build_pdf(
+async def build_pdf_full_width(
     ctx: Context,
     document_structure: dict,
     font: str = "Times-Roman",
     font_size: int = 10,
     bearer_token: Optional[str] = None,
 ) -> Any:
-    """Render a tagged `document_structure` into a professional PDF report.
+    """Render a tagged `document_structure` into a full-width PDF and return a link.
 
-    `document_structure` must follow the tag DSL from `list_pdf_options` — call
-    that first. The report is letter-size with a fixed left sidebar rail on every
-    page: include `_sidebar`-tagged blocks to fill it (keep sidebar content to one
-    page; it does not paginate) and `_main`-tagged blocks for the paginated body.
+    THE DEFAULT PDF BUILDER — reach for this first. `document_structure` must
+    follow the tag DSL from `list_pdf_options` (call that first). The page is a
+    single letter-size column: no sidebar rail, `_sidebar`-tagged blocks flow
+    inline with everything else, and tag suffixes are optional (bare legacy tags
+    like paragraph/table/line_chart are accepted). Blocks render in key insertion
+    order and paginate normally. Best for memos, narratives, and any report whose
+    content reads as one flowing column.
+
+    Use `build_pdf_sidebar` INSTEAD only when the format genuinely benefits from a
+    fixed left rail of at-a-glance metadata (e.g. an equity research note with
+    rating, price target, and key stats beside the body). Decide from the user's
+    request and the desired format.
 
     For charts, PREFER DATA OVER PIXELS: send raw series through the native chart
     tags (line/bar, or a 'multi_panel' item under line_chart_two_main for stacked
@@ -517,56 +525,61 @@ async def build_pdf(
     already hold verbatim: hand-built base64 risks corruption in transit, and an
     unreadable image degrades to blank space instead of failing the build.
 
-    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10).
-    Synchronous — returns {"pdf_base64": "<base64-encoded PDF>", "warnings": [...]}.
-    Decode `pdf_base64` to save or render the file, and CHECK `warnings`: a
+    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10). Returns
+    {"s3_presigned_url": "<time-limited S3 link to the PDF>", "warnings": [...]}.
+    Hand the user the URL (it expires), or pass it to `download_pdf_from_url` to
+    pull the bytes inline on clients that can't open the link. CHECK `warnings`: a
     non-empty list means one or more blocks (usually a figure/image) were dropped
-    or rendered degraded. For a full-width report with no sidebar rail, use
-    `build_pdf_full_width`.
-
-    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
-    retry. Omit only if the MCP client forwards an Authorization header.
-    """
-    return await _send(
-        ctx, "POST", "/create-pdf-sidebar",
-        json={"document_structure": document_structure, "font": font, "font_size": font_size},
-        bearer_token=bearer_token,
-    )
-
-
-@mcp.tool()
-async def build_pdf_full_width(
-    ctx: Context,
-    document_structure: dict,
-    font: str = "Times-Roman",
-    font_size: int = 10,
-    bearer_token: Optional[str] = None,
-) -> Any:
-    """Render a tagged `document_structure` into a full-width PDF (no sidebar rail).
-
-    Same tag DSL and engine as `build_pdf` — call `list_pdf_options` first — but
-    the page is a single letter-size column: there is no sidebar rail,
-    `_sidebar`-tagged blocks flow inline with everything else, and tag suffixes
-    are optional (bare legacy tags like paragraph/table/line_chart are accepted).
-    Blocks render in key insertion order and paginate normally. Use this for
-    memo-style, full-width documents; prefer `build_pdf` when the report calls
-    for a sidebar rail (rating, price target, key stats).
-
-    For charts, PREFER DATA OVER PIXELS: send raw series through the native chart
-    tags (line/bar, or a 'multi_panel' item under line_chart_two_main) rather than
-    embedding hand-built base64 images via figure tags — large base64 risks
-    corruption in transit, and an unreadable image degrades to blank space.
-
-    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10).
-    Synchronous — returns {"pdf_base64": "<base64-encoded PDF>", "warnings": [...]}.
-    Decode `pdf_base64` to save or render the file, and CHECK `warnings`: a
-    non-empty list means one or more blocks were dropped or rendered degraded.
+    or rendered degraded.
 
     Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
     retry. Omit only if the MCP client forwards an Authorization header.
     """
     return await _send(
         ctx, "POST", "/create-pdf",
+        json={"document_structure": document_structure, "font": font, "font_size": font_size},
+        bearer_token=bearer_token,
+    )
+
+
+@mcp.tool()
+async def build_pdf_sidebar(
+    ctx: Context,
+    document_structure: dict,
+    font: str = "Times-Roman",
+    font_size: int = 10,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Render a tagged `document_structure` into a sidebar-layout PDF and return a link.
+
+    Same tag DSL and engine as `build_pdf_full_width` (call `list_pdf_options`
+    first) but the report adds a fixed grey left rail drawn on every page: put
+    `_sidebar`-tagged blocks in the rail (rating, price target, key stats — keep
+    it short; the rail does NOT paginate, so one page height of content max, or
+    the overflow is dropped) and `_main`-tagged blocks in the paginated main column.
+
+    Choose this over the default `build_pdf_full_width` only when the format
+    genuinely calls for an at-a-glance metadata rail — a classic equity research
+    note is the canonical case. For most documents (memos, narratives,
+    single-column reports), prefer `build_pdf_full_width`. Decide from the user's
+    request and the desired format.
+
+    For charts, PREFER DATA OVER PIXELS: send raw series through the native chart
+    tags (line/bar, or a 'multi_panel' item under line_chart_two_main) rather than
+    embedding hand-built base64 images via figure tags — large base64 risks
+    corruption in transit, and an unreadable image degrades to blank space.
+
+    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10). Returns
+    {"s3_presigned_url": "<time-limited S3 link to the PDF>", "warnings": [...]}.
+    Hand the user the URL (it expires), or pass it to `download_pdf_from_url` to
+    pull the bytes inline on clients that can't open the link. CHECK `warnings`: a
+    non-empty list means one or more blocks were dropped or rendered degraded.
+
+    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
+    retry. Omit only if the MCP client forwards an Authorization header.
+    """
+    return await _send(
+        ctx, "POST", "/create-pdf-sidebar",
         json={"document_structure": document_structure, "font": font, "font_size": font_size},
         bearer_token=bearer_token,
     )
