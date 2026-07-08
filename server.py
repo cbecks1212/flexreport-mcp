@@ -927,10 +927,121 @@ async def get_stock_picks(
     `strategy_name` optionally narrows to a single strategy (e.g. one of the
     `strategy_update` baskets); omit it to get picks across all strategies. Synchronous
     and read-only — no auth required.
+
+    Each holding also carries a CURRENT-BASKET YTD view: `ytd_return` (that stock's
+    Jan 1 -> now price return) and the strategy-level weighted `basket_ytd_return`.
+    For how the strategies have ACTUALLY performed since inception (the realized track
+    record of the book as held), use `get_strategy_performance_summary` /
+    `get_strategy_track_record` instead.
     """
     params = {"strategy_name": strategy_name} if strategy_name else None
     return await _send(
         ctx, "GET", "/get-stock-picks", params=params, require_auth=False
+    )
+
+
+# The four strategy books plus the pooled optimized book — the valid `strategy_name`
+# values for the track-record / swap-ledger tools (backend rejects anything else).
+StrategyBook = Literal[
+    "momentum", "multi_signal", "fundamentals_smid", "value_quality", "pooled"
+]
+
+
+@mcp.tool()
+async def get_strategy_performance_summary(
+    ctx: Context,
+    amount: float = 1.0,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Leaderboard of since-inception performance vs the S&P 500 for all strategy books.
+
+    THE first stop for "how are the stock picks / strategies performing?". Returns one
+    headline row per book — the four strategies plus the pooled optimized book — sorted
+    by excess return over the S&P 500: {strategy_name, display_name, inception_date,
+    since_inception_return, sp_since_inception, excess_since_inception,
+    annualized_return, max_drawdown, sharpe, sp_sharpe, ytd_return, growth_strategy,
+    growth_sp, days_tracked}.
+
+    `amount` scales the growth-of-$ fields (growth_strategy / growth_sp = what `amount`
+    invested at inception would be worth in the strategy vs the S&P 500).
+
+    Drill into one book's full daily series with `get_strategy_track_record`, or its
+    per-trade adds/drops with `get_strategy_swaps`. `bearer_token` (a JWT from
+    `get_token`) authenticates as that user; omit it to use the MCP client's configured
+    Authorization header.
+    """
+    return await _send(
+        ctx, "GET", "/get-strategy-performance-summary",
+        params={"amount": amount},
+        bearer_token=bearer_token,
+    )
+
+
+@mcp.tool()
+async def get_strategy_track_record(
+    ctx: Context,
+    strategy_name: StrategyBook,
+    book: Literal["llm", "mechanical"] = "llm",
+    amount: float = 1.0,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Since-inception daily track record vs the S&P 500 for ONE strategy book.
+
+    Returns the realized performance of the book as actually held — chartable series
+    plus headline stats: {strategy_name, book, inception_date, amount_invested,
+    summary: {since_inception_return, sp_since_inception, excess_since_inception,
+    annualized_return, max_drawdown, sharpe, sp_sharpe, ytd_return, growth_strategy,
+    growth_sp, days_tracked, last_date},
+    series: [{date, strategy_cumulative, benchmark_cumulative, excess, strategy_ytd,
+    growth_strategy, growth_sp, sharpe_expanding, holdings_count}, ...]}.
+
+    `strategy_name` is one of the four strategies or "pooled" (the pooled optimized
+    book). `book` selects the variant: "llm" (LLM-curated selections, the default) or
+    "mechanical" (the raw quantitative screen, no LLM overlay). `amount` scales the
+    growth-of-$ fields. The Sharpe series is expanding-window and annualized (rf=0).
+
+    Backend returns 404 when the chosen book has no performance history yet. For the
+    cross-book leaderboard use `get_strategy_performance_summary`; for the current
+    holdings themselves use `get_stock_picks`. `bearer_token` (a JWT from `get_token`)
+    authenticates as that user; omit it to use the MCP client's configured
+    Authorization header.
+    """
+    return await _send(
+        ctx, "GET", "/get-strategy-track-record",
+        params={"strategy_name": strategy_name, "book": book, "amount": amount},
+        bearer_token=bearer_token,
+    )
+
+
+@mcp.tool()
+async def get_strategy_swaps(
+    ctx: Context,
+    strategy_name: StrategyBook,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Per-trade swap ledger (adds/drops) vs the S&P 500 for ONE strategy book.
+
+    Answers "were the individual trades good?": across consecutive weekly rebalances,
+    an ADD is a name newly selected and a DROP a name removed. Each ADD is measured
+    from entry to its exit (or the latest close if still held); each DROP is the
+    FOREGONE return from its exit to the latest close. Both are compared to the S&P
+    500 over the same window.
+
+    Returns {strategy_name,
+    trades: [{symbol, action, event_date, window_end, still_open, name_return,
+    sp_return, excess}, ...] (newest first),
+    summary: {n_adds, n_drops, avg_add_excess_vs_sp, avg_drop_foregone_excess_vs_sp,
+    net_swap_value_add}}.
+
+    `strategy_name` is one of the four strategies or "pooled". For the book-level
+    return series use `get_strategy_track_record`. `bearer_token` (a JWT from
+    `get_token`) authenticates as that user; omit it to use the MCP client's
+    configured Authorization header.
+    """
+    return await _send(
+        ctx, "GET", "/get-strategy-swaps",
+        params={"strategy_name": strategy_name},
+        bearer_token=bearer_token,
     )
 
 @mcp.tool()
