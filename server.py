@@ -11,7 +11,7 @@ import base64
 import json
 import os
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, get_args
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
@@ -58,6 +58,45 @@ if _OAUTH_ENABLED:
         resource_server_url=MCP_RESOURCE_URL,
         required_scopes=[],  # backend enforces scope/plan; don't gate at the transport
     )
+# --- Discovery / metadata catalogues ---------------------------------------
+# One tool (`list_options`) enumerates valid parameter values (event types,
+# report override items, sectors, tickers, PDF tags, indicators, ...) instead
+# of a standalone tool per catalogue. All read-only and public.
+
+_OPTION_ENDPOINTS = {
+    "event_types": "/list-realtime-event-options",
+    "financial_items": "/list-financial-items",
+    "financial_ratios": "/list-financial-ratios",
+    "sectors": "/get-sectors",
+    "institutional_investor_types": "/list-institutional-investor-types",
+    "countries": "/list-countries",
+    "fiscal_quarter": "/get-fiscal-quarter",
+    "market_cap": "/list-marketcap-options",
+    "intraday_frequency": "/list-intraday-chart-options",
+    "pdf_options": "/list-pdf-tag-options",
+    "technical_indicators": "/list-technical-indicators",
+    "tickers": "/list-tickers",
+    "tickers_with_names": "/list-symbols-with-names",
+}
+
+# The `kind` schema advertised to MCP clients. Members must stay in lockstep
+# with the dict keys above (guarded by the assert).
+_OptionKind = Literal[
+    "event_types",
+    "financial_items",
+    "financial_ratios",
+    "sectors",
+    "institutional_investor_types",
+    "countries",
+    "fiscal_quarter",
+    "market_cap",
+    "intraday_frequency",
+    "pdf_options",
+    "technical_indicators",
+    "tickers",
+    "tickers_with_names",
+]
+assert set(get_args(_OptionKind)) == set(_OPTION_ENDPOINTS)
 
 mcp = FastMCP(
     "flexreport",
@@ -157,7 +196,7 @@ async def list_realtime_events(
     `event_type` defaults to "eps_update". Other values include: eps_release,
     8k_release, company_update, biggest_mover, earnings_transcript_update,
     analyst_rating_update, news_evolution, earnings_themes, llm_basket_update,
-    strategy_update. Call `list_report_options("event_types")` for the
+    strategy_update. Call `list_options("event_types")` for the
     authoritative, current set — do not guess.
 
     Optionally narrow results by `tickers`, `sector`, `industry`, or `market_cap`
@@ -211,7 +250,7 @@ async def list_realtime_events(
 #     Only `ticker` is required; the backend applies sensible defaults for everything
 #     else. Pass `overrides` to customize the report (e.g.
 #     {"include_transcript": false, "ratios": [...], "filing_frequency": "annual"}).
-#     Discover valid override values with `list_report_options`: "financial_items"
+#     Discover valid override values with `list_options`: "financial_items"
 #     and "financial_ratios" for the line items/ratios, and
 #     "institutional_investor_types" for `overrides.institutional_ownership`.
 #
@@ -400,36 +439,8 @@ async def download_pdf_from_url(
     }
 
 
-# --- Discovery / metadata tools -------------------------------------------
-# Let the agent enumerate valid parameter values (event types, report override
-# items, sector/industry filters) instead of guessing. All read-only and public.
-
-_OPTION_ENDPOINTS = {
-    "event_types": "/list-realtime-event-options",
-    "financial_items": "/list-financial-items",
-    "financial_ratios": "/list-financial-ratios",
-    "sectors": "/get-sectors",
-    "institutional_investor_types": "/list-institutional-investor-types",
-    "countries": "/list-countries",
-    "fiscal_quarter": "/get-fiscal-quarter",
-    "market_cap": "/list-marketcap-options",
-}
-
-
 @mcp.tool()
-async def list_report_options(
-    ctx: Context,
-    kind: Literal[
-        "event_types",
-        "financial_items",
-        "financial_ratios",
-        "sectors",
-        "institutional_investor_types",
-        "countries",
-        "fiscal_quarter",
-        "market_cap",
-    ],
-) -> Any:
+async def list_options(ctx: Context, kind: _OptionKind) -> Any:
     """Enumerate the valid values for a parameter, straight from the backend.
 
     Call this BEFORE guessing a parameter value. `kind` selects which catalog:
@@ -446,9 +457,24 @@ async def list_report_options(
     - "fiscal_quarter"               -> the most recent fiscal quarter being reported
     - "market_cap"                   -> valid `market_cap` buckets (Small-cap,
                                         Medium-cap, Large-cap, Mega-cap)
+    - "intraday_frequency"           -> supported intraday chart frequencies
+    - "pdf_options"                  -> the complete `document_structure` tag DSL for
+                                        `build_pdf_full_width` / `build_pdf_sidebar`:
+                                        every block tag, its payload shape with a worked
+                                        example, usage rules, and a full example document.
+                                        Call before your FIRST build — do not guess
+    - "technical_indicators"         -> indicator names accepted by
+                                        `get_technical_indicator_data` (rsi, macd,
+                                        sma_50, ...); an unknown indicator there
+                                        returns a 400 listing this set
+    - "tickers"                      -> the full covered ticker universe as bare
+                                        symbols. NOTE: thousands of names — a large
+                                        payload
+    - "tickers_with_names"           -> the same universe as {symbol, company_name}
+                                        pairs (an even larger payload)
 
     Authoritative and never stale: it reads the backend's live config, not a
-    hardcoded list.
+    hardcoded list. Public — no auth required.
     """
     return await _send(ctx, "GET", _OPTION_ENDPOINTS[kind], require_auth=False)
 
@@ -457,42 +483,13 @@ async def list_report_options(
 async def list_sub_industries(ctx: Context, sectors: list[str]) -> Any:
     """List the sub-industries within one or more sectors.
 
-    `sectors` must be values from `list_report_options("sectors")`. Returns the
+    `sectors` must be values from `list_options("sectors")`. Returns the
     distinct industries used to narrow `list_realtime_events(industry=[...])`.
     """
     return await _send(
         ctx, "GET", "/get-sub-industries",
         params={"sector": sectors}, require_auth=False,
     )
-
-
-@mcp.tool()
-async def list_tickers(ctx: Context, with_names: bool = False) -> Any:
-    """List the ticker universe FlexReport covers.
-
-    `with_names=False` returns bare symbols; `with_names=True` returns
-    {symbol, company_name} pairs. NOTE: this is the full universe (thousands of
-    names) and can be a large payload.
-    """
-    path = "/list-symbols-with-names" if with_names else "/list-tickers"
-    return await _send(ctx, "GET", path, require_auth=False)
-
-
-@mcp.tool()
-async def list_pdf_options(ctx: Context) -> Any:
-    """Return the complete, current `document_structure` tag catalogue for the PDF builders.
-
-    Call this BEFORE your first `build_pdf_full_width` / `build_pdf_sidebar` — do
-    not guess the structure. The response documents the report DSL straight from the
-    backend: every supported block tag (sidebar/main paragraphs, tables, bullet
-    lists, line & bar charts, stacked multi-panel TA charts, KPI stat cards,
-    pre-rendered figures, images, dividers), each tag's payload shape with a
-    worked example, usage rules (key naming, ordering, markdown support, chart
-    data format), and a complete example `document_structure`. Authoritative and
-    never stale — it reads the backend's live catalogue, not a hardcoded copy.
-    Public — no auth required.
-    """
-    return await _send(ctx, "GET", "/list-pdf-tag-options", require_auth=False)
 
 
 @mcp.tool()
@@ -506,7 +503,7 @@ async def build_pdf_full_width(
     """Render a tagged `document_structure` into a full-width PDF and return a link.
 
     THE DEFAULT PDF BUILDER — reach for this first. `document_structure` must
-    follow the tag DSL from `list_pdf_options` (call that first). The page is a
+    follow the tag DSL from `list_options("pdf_options")` (call that first). The page is a
     single letter-size column: no sidebar rail, `_sidebar`-tagged blocks flow
     inline with everything else, and tag suffixes are optional (bare legacy tags
     like paragraph/table/line_chart are accepted). Blocks render in key insertion
@@ -552,7 +549,7 @@ async def build_pdf_sidebar(
 ) -> Any:
     """Render a tagged `document_structure` into a sidebar-layout PDF and return a link.
 
-    Same tag DSL and engine as `build_pdf_full_width` (call `list_pdf_options`
+    Same tag DSL and engine as `build_pdf_full_width` (call `list_options("pdf_options")`
     first) but the report adds a fixed grey left rail drawn on every page: put
     `_sidebar`-tagged blocks in the rail (rating, price target, key stats — keep
     it short; the rail does NOT paginate, so one page height of content max, or
@@ -617,26 +614,6 @@ async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
 
 
 @mcp.tool()
-async def list_technical_indicators(
-    ctx: Context,
-    bearer_token: Optional[str] = None,
-) -> Any:
-    """List the technical indicators available via `get_technical_indicator_data`.
-
-    Returns bare indicator names (e.g. "rsi", "macd", "sma_50") — the names accepted
-    as the `indicator` argument to `get_technical_indicator_data`. Call this FIRST to
-    discover valid values instead of guessing; an unknown indicator there returns a 400
-    listing the valid set.
-
-    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
-    retry. Omit only if the MCP client forwards an Authorization header.
-    """
-    return await _send(
-        ctx, "GET", "/list-technical-indicators", bearer_token=bearer_token
-    )
-
-
-@mcp.tool()
 async def get_technical_indicator_data(
     ctx: Context,
     symbol: str,
@@ -647,9 +624,9 @@ async def get_technical_indicator_data(
 ) -> Any:
     """Fetch a historical technical-indicator series for a symbol over a date range.
 
-    `indicator` must be one of the names from `list_technical_indicators` (call it
-    first). `start_date` and `end_date` are inclusive and must be "YYYY-MM-DD".
-    `symbol` is validated against the covered universe (`list_tickers`); an unknown
+    `indicator` must be one of the names from `list_options("technical_indicators")`
+    (call it first). `start_date` and `end_date` are inclusive and must be "YYYY-MM-DD".
+    `symbol` is validated against the covered universe (`list_options("tickers")`); an unknown
     symbol returns 404 and an unknown indicator returns 400 listing valid values.
 
     Returns a list of daily records (each row's columns vary by indicator), ordered by
@@ -789,7 +766,7 @@ async def onboard_symbol(
 
     Kicks off a 30-60 min backend workflow and emails the authenticated user when
     the first report is ready. Rate-limited to 5/hour per user. Use only when a
-    symbol is missing from `list_tickers` / returns no data elsewhere.
+    symbol is missing from `list_options("tickers")` / returns no data elsewhere.
     `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
     use the MCP client's configured Authorization header.
 
@@ -816,7 +793,7 @@ async def screen_stocks(
     """Screen stocks by financial growth, sector, sub-industry, market cap, analyst ratings, institutional ownership, country, and price performance.
 
     `market_cap` accepts buckets like "Small-cap", "Medium-cap", "Large-cap".
-    Discover valid values with the list tools: `list_report_options` (e.g.
+    Discover valid values with the list tools: `list_options` (e.g.
     kind="sectors", "institutional_investor_types") and `list_sub_industries`.
 
     `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
@@ -855,7 +832,7 @@ async def optimize_portfolio_default(
 
     `risk_tolerance` (conservative | balanced | aggressive) selects which risk
     profile is marked as recommended. Symbols are validated against the covered
-    universe (`list_tickers`); unsupported tickers come back in `missing`, and
+    universe (`list_options("tickers")`); unsupported tickers come back in `missing`, and
     in-universe tickers with too little price history come back in `dropped`.
 
     No auth required (public endpoint). `bearer_token` (a JWT from `get_token`) is
@@ -1095,7 +1072,7 @@ async def schedule_task(
     - "report"   -> recurring company report. instructions REQUIRES `ticker`; optional
                     override keys customize it — line items, ratios, filing frequency,
                     institutional-ownership cuts (discover valid values with
-                    `list_report_options`), e.g.
+                    `list_options`), e.g.
                     {"ticker": "AAPL", "include_transcript": false, "ratios": [...]}.
     - "screener" -> recurring stock screen. instructions takes the same keys as
                     `screen_stocks`: metrics, sectors, sub_sectors, market_cap,
@@ -1111,7 +1088,7 @@ async def schedule_task(
                     "eps_update"), tickers, sector, industry, market_cap
                     (e.g. {"event_type": "eps_update", "tickers": ["AAPL","MSFT"]}).
 
-    Discover valid values with the list tools (`list_report_options`,
+    Discover valid values with the list tools (`list_options`,
     `list_sub_industries`) rather than guessing; invalid enum values are rejected
     server-side. `bulk_subscribe=True` subscribes a wider audience instead of just
     the caller — leave it False unless the user explicitly asks.
@@ -1205,7 +1182,7 @@ async def list_earnings_announcements(
 
     Optional filters, all AND-ed together:
     - `symbols`     -> limit to these tickers (e.g. ["AAPL","MSFT"]).
-    - `sector`      -> values from `list_report_options("sectors")`.
+    - `sector`      -> values from `list_options("sectors")`.
     - `industry`    -> values from `list_sub_industries([...])`.
     - `market_cap`  -> buckets like "Small-cap", "Medium-cap", "Large-cap", "Mega-cap".
     `sector`, `industry`, and `market_cap` are validated against fixed enums server-side;
