@@ -651,18 +651,23 @@ async def get_technical_indicator_data(
 async def detect_intraday_outlier_jumps(
     ctx: Context,
     symbol: str,
+    frequency: Literal[
+        "one_minute", "five_minute", "thirty_minute", "one_hour", "four_hour"
+    ] = "one_minute",
     zscore_threshold: float = 2.0,
     bearer_token: Optional[str] = None,
 ) -> Any:
-    """Live look at TODAY's 1-minute intraday tape, flagging outlier price jumps.
+    """Live look at TODAY's intraday tape, flagging outlier price jumps.
 
-    Pulls today's one-minute bars for `symbol` (US/Eastern trading day) live and flags
-    each minute whose move is a statistical outlier versus the stock's own daily-return
-    volatility — i.e. minutes where |z-score| of the move exceeds `zscore_threshold`.
-    Use it for a quick "is the stock making an abnormal intraday move right now?" read.
+    Pulls today's intraday bars for `symbol` (US/Eastern trading day) live at the given
+    `frequency` and flags each bar whose move is a statistical outlier versus the stock's
+    own daily-return volatility — i.e. bars where |z-score| of the move exceeds
+    `zscore_threshold`. Use it for a quick "is the stock making an abnormal intraday move
+    right now?" read. `list_options(kind="intraday_frequency")` lists the supported
+    frequencies straight from the backend.
 
     `zscore_threshold` (default 2.0) is the daily-sigma cutoff: higher = stricter (fewer,
-    more extreme flags), lower = more sensitive. Synchronous — returns the flagged minutes
+    more extreme flags), lower = more sensitive. Synchronous — returns the flagged bars
     directly (no task id to poll). Returns a 404-style error if no intraday data is
     available yet (e.g. before the market opens or for an uncovered symbol).
 
@@ -671,7 +676,7 @@ async def detect_intraday_outlier_jumps(
     """
     return await _send(
         ctx, "GET", "/detect-intraday-outlier-jumps",
-        params={"symbol": symbol, "zscore_threshold": zscore_threshold},
+        params={"symbol": symbol, "frequency": frequency, "zscore_threshold": zscore_threshold},
         bearer_token=bearer_token,
     )
 
