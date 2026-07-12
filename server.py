@@ -1,4 +1,4 @@
-"""FlexReport MCP server — exposes the equity backend's live events and report
+"""Flexreport MCP server — exposes the equity backend's live events and report
 artifacts as on-demand MCP tools over streamable-http.
 
 Each tool is a thin wrapper around a public backend HTTP endpoint. The caller's
@@ -297,7 +297,7 @@ async def generate_research_report(
     instead. This is the slow, professional DEEP-DIVE — reach for it only when the user
     EXPLICITLY asks for a full writeup, not for an ordinary exploratory question.
 
-    If the user only wants to EXPLORE the data or "use FlexReport to explore...", do NOT
+    If the user only wants to EXPLORE the data or "use Flexreport to explore...", do NOT
     start here — call `explore_data_catalogue` first (fast, interactive charts/tables) and
     reach for THIS deep-dive only later, once the user has reviewed the exploration and
     EXPLICITLY asks for the full report. Never run both for the same question at once.
@@ -322,18 +322,20 @@ async def explore_data_catalogue(
     query: str,
     bearer_token: Optional[str] = None,
 ) -> Any:
-    """Explore FlexReport's data platform with an OPEN-ENDED question — fast, interactive EDA.
+    """Explore Flexreport's data platform with an OPEN-ENDED question — designed to handle many research based or open ended questions, enabling interactive EDA.
 
-    ===> THE DEFAULT, FIRST-STEP tool whenever the user wants to EXPLORE the data, get a
-    feel for what FlexReport's platform covers, or understand a topic from the data
-    (e.g. "use FlexReport to explore...", "how are small caps doing — explore the data",
-    "what data do you have on semiconductor margins?"). It validates the request, plans
-    queries against the data catalogue, runs them, and returns the raw result sets to
-    render as INTERACTIVE CHARTS AND TABLES on the dashboard.
+    ===> THE DEFAULT, FIRST-STEP tool whenever the user wants to EXPLORE the data or
+    understand a topic from the data (e.g. "use Flexreport to explore...", "how are
+    small caps doing — explore the data", "how have semiconductor margins trended?").
+    It validates the request, plans queries against the data catalogue, runs them, and
+    returns the raw result sets to render as INTERACTIVE CHARTS AND TABLES on the
+    dashboard. For pure coverage/enumeration questions ("which symbols / sectors /
+    indicators are available?", "is X covered?") prefer `list_options` instead — it
+    answers instantly from the live catalogs, no async job needed.
 
     *** RUN THIS BY ITSELF FIRST. DO NOT ALSO LAUNCH `generate_research_report` FOR THE
     SAME QUESTION. *** These two tools are SEQUENTIAL STEPS, never parallel:
-      1. `explore_data_catalogue` (this tool) — the quick exploratory pass. Run it,
+      1. `explore_data_catalogue` (this tool) — While usually not as slow as generate_research_report, this is by no means lightning fast and takes some time to complete, as it carefully determines the best datasets from the data catalogue that match the user's question and then applies the appropriate SQL to provide the user with informative results.
          poll it, SHOW the user the resulting charts/tables, and let them iterate.
       2. `generate_research_report` — the slow (~10-12 min), professional analyst-grade
          deep-dive. Reach for it ONLY LATER, AFTER the user has seen the exploration and
@@ -381,7 +383,7 @@ async def get_latest_report(
     symbols: list[str],
     bearer_token: Optional[str] = None,
 ) -> Any:
-    """Get the latest FlexReport research report(s) for one or more tickers. USE THIS BY DEFAULT.
+    """Get the latest Flexreport research report(s) for one or more tickers. USE THIS BY DEFAULT.
 
     ===> THIS IS THE DEFAULT, CORRECT TOOL whenever a user asks for "the report",
     "research", "the latest research", "analysis", "a writeup", or "the PDF" for a
@@ -480,11 +482,14 @@ async def list_options(ctx: Context, kind: _OptionKind) -> Any:
                                         `get_technical_indicator_data` (rsi, macd,
                                         sma_50, ...); an unknown indicator there
                                         returns a 400 listing this set
-    - "tickers"                      -> the full covered ticker universe as bare
-                                        symbols. NOTE: thousands of names — a large
-                                        payload
-    - "tickers_with_names"           -> the same universe as {symbol, company_name}
-                                        pairs (an even larger payload)
+    - "tickers"                      -> the full covered symbol universe as bare
+                                        symbols — equities PLUS ~420 market indices
+                                        as caret-prefixed symbols (^GSPC, ^VIX, ...).
+                                        NOTE: thousands of names — a large payload
+    - "tickers_with_names"           -> {symbol, company_name} pairs for the company
+                                        universe ONLY — market indices are NOT in
+                                        this list, only in "tickers" (an even larger
+                                        payload)
 
     Authoritative and never stale: it reads the backend's live config, not a
     hardcoded list. Public — no auth required.
@@ -616,9 +621,10 @@ async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
     "how did this change", use `explore_data_catalogue` instead.
 
     Scope caveat: the snapshot is a FIXED set of current blocks, not the full
-    catalogue. Absence of a data domain HERE does NOT mean FlexReport lacks it —
-    do not infer coverage gaps from this tool. Route any coverage or
-    "do you have data on ..." question to `explore_data_catalogue`.
+    catalogue. Absence of a data domain HERE does NOT mean Flexreport lacks it —
+    do not infer coverage gaps from this tool. Route "which symbols / values are
+    available" enumerations to `list_options` (instant), and "do you have data
+    on <topic>" questions that need actual data to `explore_data_catalogue`.
     """
     return await _send(
         ctx, "GET", "/get-company-snapshot",
@@ -1191,11 +1197,11 @@ async def list_earnings_announcements(
     market_cap: Optional[list[str]] = None,
     bearer_token: Optional[str] = None,
 ) -> Any:
-    """List scheduled earnings announcements within a date window, FlexReport names only.
+    """List scheduled earnings announcements within a date window, Flexreport names only.
 
     `start_date` and `end_date` are `YYYY-MM-DD` strings; both default to today when
     omitted (so omit them for "who reports today"). Anything the backend can't parse as
-    a date returns a 422 — do not pass other formats. Results are restricted to FlexReport's
+    a date returns a 422 — do not pass other formats. Results are restricted to Flexreport's
     covered universe, so symbols outside coverage are dropped silently.
 
     Optional filters, all AND-ed together:
@@ -1242,7 +1248,7 @@ async def list_earnings_announcements(
 
 @_pre_auth_tool
 async def register_user(ctx: Context, email: str, password: str) -> Any:
-    """Register a new FlexReport account (step 1 for new users).
+    """Register a new Flexreport account (step 1 for new users).
 
     Pre-auth — no JWT required. The backend emails a confirmation link/token; the
     user clicks the link (or pastes the token to `confirm_registration`) to
