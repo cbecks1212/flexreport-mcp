@@ -1234,6 +1234,30 @@ async def list_earnings_announcements(
         ctx, "POST", "/list-upcoming-earnings-announcements", json=body, bearer_token=bearer_token
     )
 
+@mcp.tool()
+async def is_market_open(ctx: Context, exchange: str = "NYSE") -> Any:
+    """Check whether an exchange is currently open — a cheap routing helper.
+
+    `exchange` is a CASE-SENSITIVE exchange code (e.g. "NYSE", "NASDAQ", "LSE");
+    defaults to NYSE, the right choice for US equities. An unknown or wrong-case
+    code returns a 400 "Exchange not found." error — use uppercase codes, not
+    full names.
+
+    Returns a one-element list; the answer is its `isMarketOpen` boolean. The
+    record also carries the session hours (`openingHour`/`closingHour` with UTC
+    offsets), `timezone`, and any additional-session bounds.
+
+    Use it to route between the market-hours tools: when the market is CLOSED,
+    extended-hours data lives in `get_aftermarket_quotes`/`get_aftermarket_trades`;
+    when OPEN, `detect_intraday_outlier_jumps` gives the live intraday read.
+    No auth required.
+
+    Unsure which exchange a ticker trades on? `get_company_snapshot` returns an
+    `exchange` field whose value can be passed here as-is.
+    """
+    return await _send(
+        ctx, "GET", "/is-market-open", params={"exchange" : exchange}, require_auth=False
+    )
 
 # --- Auth / registration --------------------------------------------------
 # Pre-auth flows (no JWT yet). See the server `instructions` for the full playbook.
