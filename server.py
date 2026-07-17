@@ -231,53 +231,54 @@ async def list_realtime_events(
     return await _send(ctx, "POST", "/get-realtime-events", json=body, bearer_token=bearer_token)
 
 
-# --- generate_report: DISABLED (intentionally not registered as an MCP tool) ---
-# Commented out on purpose. This on-the-fly bespoke report builder overlapped with
-# get_latest_report / generate_research_report / explore_data_catalogue and was a
-# frequent source of mis-routing — agents reached for it instead of the exploratory
-# or deep-dive paths. It is effectively an internal operations endpoint right now, so
-# we no longer advertise it to clients. The backend `/create-full-report` endpoint is
-# unchanged; re-enable by uncommenting the decorator + function below.
-#
-# @mcp.tool()
-# async def generate_report(
-#     ctx: Context,
-#     ticker: str,
-#     overrides: Optional[dict] = None,
-#     bearer_token: Optional[str] = None,
-# ) -> Any:
-#     """Build a NEW BESPOKE report on the fly for one ticker (slow, async). LAST RESORT.
-#
-#     ===> This is a LAST-RESORT tool, NOT the default. Reach for it ONLY when EITHER:
-#       (a) `get_latest_report` has no cached report for the ticker (it came back in
-#           `missing`), so there is nothing pre-built to return, OR
-#       (b) the user EXPLICITLY wants to CUSTOMIZE the report with specific line items,
-#           ratios, filing frequency, institutional-ownership cuts, or other `overrides`
-#           that the cached report does not already cover.
-#
-#     DO NOT use this for an ordinary "get me the report / research / analysis" request —
-#     use `get_latest_report` instead, which returns the pre-built cached report instantly.
-#     For an open-ended or thematic QUESTION (about a ticker or the broader market), use
-#     `generate_research_report` instead. This tool kicks off a slow, asynchronous build.
-#
-#     Only `ticker` is required; the backend applies sensible defaults for everything
-#     else. Pass `overrides` to customize the report (e.g.
-#     {"include_transcript": false, "ratios": [...], "filing_frequency": "annual"}).
-#     Discover valid override values with `list_options`: "financial_items"
-#     and "financial_ratios" for the line items/ratios, and
-#     "institutional_investor_types" for `overrides.institutional_ownership`.
-#
-#     `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-#     use the MCP client's configured Authorization header.
-#
-#     This is asynchronous. The response is keyed by ticker, e.g.
-#     {"AAPL": {"task_id": "...", "status": "PENDING"}}. Read result["AAPL"]["task_id"]
-#     and poll it with `get_task_status` until status is SUCCESS.
-#     """
-#     payload = {"ticker": ticker, **(overrides or {})}
-#     return await _send(
-#         ctx, "POST", "/create-full-report", json=payload, bearer_token=bearer_token
-#     )
+
+@mcp.tool()
+async def generate_report_for_stock(
+    ctx: Context,
+    ticker: str,
+    overrides: Optional[dict] = None,
+    bearer_token: Optional[str] = None,
+) -> Any:
+    """Build a NEW BESPOKE report on the fly for one ticker (slow, async; takes ~10 minutes).
+
+    ===> This is an on-demand tool to create a fresh report on a company for a user. The suggested use is:
+      (a) `get_latest_report` has no cached report for the ticker (it came back in
+          `missing`), so there is nothing pre-built to return, OR the cached report is stale OR
+      (b) the user EXPLICITLY wants the report to EMPHASIZE specific line items, ratios,
+          estimates, or technical indicators that the cached report does not already
+          highlight.
+
+    Use the cached first, then this second. This should not be confused with generate_research_report, which should be used for more open-ended questions or when doing things like peer comps. generate_report_for_stock is dedicated to one ticker where the user's intent is very clear e.g. has an explicit set of metrics to focus on.
+
+    Only `ticker` is required; the backend composes the report dynamically around the
+    company's latest platform events and applies sensible defaults. The `overrides`
+    keys the backend honors (all optional — any other key is accepted but IGNORED):
+      - "financial_items", "ratios", "estimate_items" (lists) — must-cover EMPHASIS
+        items woven into the report's coverage. Discover valid values with
+        `list_options`: "financial_items" and "financial_ratios".
+      - "technical_analysis_items" (list) — indicators to CHART; valid values via
+        `list_options("technical_indicators")`.
+      - "investment_thesis_impact", "significant_changes", "change_summary" (strings) —
+        editorial steer: frames the report as a company update built around these points.
+      - "use_api_financials" (bool) — source YoY financials live from the upstream data
+        provider instead of the platform's cached view (fresher, slower).
+      - "include_financials" / "include_ownership" (bools) — nudge the report's framing
+        (financials-release vs ownership-change) when no recent platform event exists.
+    Do NOT pass "include_transcript", "filing_frequency", "institutional_ownership", or
+    price-date fields — the dynamic report builder ignores them.
+
+    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
+    use the MCP client's configured Authorization header.
+
+    This is asynchronous. The response is keyed by ticker, e.g.
+    {"AAPL": {"task_id": "...", "status": "PENDING"}}. Read result["AAPL"]["task_id"]
+    and poll it with `get_task_status` until status is SUCCESS; the result carries the
+    finished report as {"pdf": "<base64>", ...}.
+    """
+    payload = {"ticker": ticker, **(overrides or {})}
+    return await _send(
+        ctx, "POST", "/create-full-report", json=payload, bearer_token=bearer_token
+    )
 
 
 @mcp.tool()
@@ -335,8 +336,10 @@ async def explore_data_catalogue(
 
     *** RUN THIS BY ITSELF FIRST. DO NOT ALSO LAUNCH `generate_research_report` FOR THE
     SAME QUESTION. *** These two tools are SEQUENTIAL STEPS, never parallel:
-      1. `explore_data_catalogue` (this tool) — While usually not as slow as generate_research_report, this is by no means lightning fast and takes some time to complete, as it carefully determines the best datasets from the data catalogue that match the user's question and then applies the appropriate SQL to provide the user with informative results.
-         poll it, SHOW the user the resulting charts/tables, and let them iterate.
+      1. `explore_data_catalogue` (this tool) — FAST: a lean validate -> plan -> run
+         pipeline with no report-rendering step, typically finishing in about a minute
+         end-to-end. Poll it, SHOW the user the resulting charts/tables, and let them
+         iterate.
       2. `generate_research_report` — the slow (~10-12 min), professional analyst-grade
          deep-dive. Reach for it ONLY LATER, AFTER the user has seen the exploration and
          EXPLICITLY asks for the full report. Firing both at once wastes a ~10-min job,
@@ -352,8 +355,10 @@ async def explore_data_catalogue(
     task to chase). On SUCCESS, `result` is:
       {"user_query": "...", "delivery": "dashboard",
        "results": {"<query name>": {"description": "...", "columns": [...],
-                                     "rows": [...up to 20 sample rows...],
+                                     "rows": [...the FULL result set...],
                                      "row_count": N}, ...}}
+    `rows` is NOT sampled — it carries every row (`row_count` matches len(rows)), so
+    charts/tables reflect the whole population.
     Render each entry as a chart/table for the user. If the request can't be served from
     the platform's data, `result` instead carries a `validation_status` of "REJECTED"
     (with a reason) — relay that rather than retrying blindly.
