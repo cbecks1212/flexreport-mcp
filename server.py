@@ -299,7 +299,8 @@ async def generate_research_report(
     EXPLICITLY asks for a full writeup, not for an ordinary exploratory question.
 
     If the user only wants to EXPLORE the data or "use Flexreport to explore...", do NOT
-    start here — call `explore_data_catalogue` first (fast, interactive charts/tables) and
+    start here — call `explore_data_catalogue` first (interactive charts/tables, usually a
+    few minutes rather than ~10-12) and
     reach for THIS deep-dive only later, once the user has reviewed the exploration and
     EXPLICITLY asks for the full report. Never run both for the same question at once.
 
@@ -336,10 +337,10 @@ async def explore_data_catalogue(
 
     *** RUN THIS BY ITSELF FIRST. DO NOT ALSO LAUNCH `generate_research_report` FOR THE
     SAME QUESTION. *** These two tools are SEQUENTIAL STEPS, never parallel:
-      1. `explore_data_catalogue` (this tool) — FAST: a lean validate -> plan -> run
-         pipeline with no report-rendering step, typically finishing in about a minute
-         end-to-end. Poll it, SHOW the user the resulting charts/tables, and let them
-         iterate.
+      1. `explore_data_catalogue` (this tool) — the LEAN route: a validate -> plan -> run
+         pipeline with no report-rendering step. Usually finishes in about a minute, but
+         run time varies with the tables queried and can reach ~5 minutes. Poll it, SHOW
+         the user the resulting charts/tables, and let them iterate.
       2. `generate_research_report` — the slow (~10-12 min), professional analyst-grade
          deep-dive. Reach for it ONLY LATER, AFTER the user has seen the exploration and
          EXPLICITLY asks for the full report. Firing both at once wastes a ~10-min job,
@@ -352,7 +353,9 @@ async def explore_data_catalogue(
 
     Asynchronous: returns {"task_id": "...", "status": "PENDING"}. Poll a SINGLE task
     with `get_task_status` until SUCCESS (the result is a plain dict — there is NO nested
-    task to chase). On SUCCESS, `result` is:
+    task to chase). Expect roughly 1-5 minutes depending on the tables queried — a task
+    still PENDING after a couple of minutes is normal, so keep polling. On SUCCESS,
+    `result` is:
       {"user_query": "...", "delivery": "dashboard",
        "results": {"<query name>": {"description": "...", "columns": [...],
                                      "rows": [...the FULL result set...],
