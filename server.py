@@ -1267,6 +1267,54 @@ async def is_market_open(ctx: Context, exchange: str = "NYSE") -> Any:
         ctx, "GET", "/is-market-open", params={"exchange" : exchange}, require_auth=False
     )
 
+
+# --- Billing / plan upgrades ----------------------------------------------
+# Both tools return a browser LINK only — the user completes payment/management
+# in Stripe. This service never touches card or account details; the caller's
+# forwarded bearer identifies the user, so neither tool takes any arguments.
+
+@mcp.tool()
+async def upgrade_plan(ctx: Context) -> str:
+    """Get a secure link for the user to upgrade or change their Flexreport Finance plan (e.g. to raise their request limit). Returns a checkout link — the user completes payment in their browser. Call this whenever the user asks to upgrade, subscribe, pay for, or change their plan, or when they've hit a usage/quota limit."""
+    # /payment/upgrade-link is quota-exempt, so this is safe even after a 429.
+    # _send forwards the caller's inbound bearer token (no bearer_token arg needed).
+    data = await _send(ctx, "GET", "/payment/upgrade-link")
+    if not isinstance(data, dict) or data.get("error") or not data.get("url"):
+        return ("Sorry, I couldn't generate an upgrade link just now. "
+                "Please try again in a moment.")
+
+    url = data["url"]
+    u = data.get("usage") or {}
+    lines = []
+    if u.get("limit") is not None:  # omit the usage line when unlimited / usage null
+        lines.append(
+            f"You're currently on the **{u.get('plan', 'free')}** plan — "
+            f"{u.get('used')}/{u.get('limit')} requests used ({u.get('period')})."
+        )
+    lines.append(f"👉 [Upgrade your plan]({url})")
+    lines.append(
+        "Open the link to choose a plan and complete checkout. Your new limit "
+        "activates as soon as payment succeeds — no need to re-authenticate here."
+    )
+    return "\n\n".join(lines)
+
+
+@mcp.tool()
+async def manage_billing(ctx: Context) -> str:
+    """Get a link to the Stripe billing portal where the user can view invoices, update their card, or cancel their subscription. Use when the user asks to manage, change, or cancel their billing/subscription."""
+    # _send forwards the caller's inbound bearer token (no bearer_token arg needed).
+    data = await _send(ctx, "GET", "/payment/portal-link")
+    if isinstance(data, dict) and data.get("url") and not data.get("error"):
+        return f"👉 [Manage your billing]({data['url']})"
+
+    err = data.get("error", "") if isinstance(data, dict) else ""
+    if "HTTP 404" in err:  # no active subscription yet
+        return ("You don't have an active paid subscription yet. "
+                "Use upgrade_plan to subscribe.")
+    return ("Sorry, I couldn't open the billing portal just now. "
+            "Please try again in a moment.")
+
+
 # --- Auth / registration --------------------------------------------------
 # Pre-auth flows (no JWT yet). See the server `instructions` for the full playbook.
 #
