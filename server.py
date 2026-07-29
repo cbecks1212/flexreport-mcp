@@ -191,30 +191,25 @@ async def list_realtime_events(
     market_cap: Optional[list[str]] = None,
     bearer_token: Optional[str] = None,
 ) -> Any:
-    """Pull live earnings/market events from the backend's Redis-backed cache (12h TTL).
+    """Pull live market events from the backend's Redis-backed cache (12h TTL).
 
-    Event types are grouped into FAMILIES of related events. `event_type` defaults
-    to "eps_update", but that is only one slice of the EARNINGS family — a question
-    about "earnings events" usually spans several of these:
-      - eps_update: intraday earnings tracker (beat/miss summary + news sources)
-      - eps_release: results release detected on announcement day
-      - financials_release: new 10-Q — fully updated company snapshot + updated PDF report
-      - transcript_update: new earnings-call transcript analyzed (thesis deltas + guidance outlook)
-      - 8k_release: earnings 8-K analysis (as-reported financials, takeaways, SEC link)
-      - earnings_themes: cross-company themes for the current earnings season
+    On ANY real-time/events request, call `list_options("event_types")` FIRST —
+    it returns every event type with its family, description, and the
+    related_events that fire around the same situation. Work from that
+    catalogue, never a remembered list of types. `event_type` defaults to
+    "eps_update", which is only one slice of the earnings family.
 
-    Other families: news (news_evolution, company_update), market movement
-    (biggest_gainer / biggest_mover / biggest_loser), institutional ownership
-    (individual_13f_filer_change, 13f_significant_position_change), analyst
-    activity (realtime_ratings_update, financial_estimate_update), strategy
-    (strategy_update, llm_basket_update), predictions
-    (stock_return_prediction_update). Call `list_options("event_types")` for the
-    authoritative current set with per-event descriptions — do not guess beyond
-    the values listed here.
+    Then CONNECT THE DOTS: fetch the type asked about and follow the situation
+    across its related_events with follow-up calls narrowed by `tickers=[...]`
+    to the symbols just seen — e.g. eps_update -> check the intraday tape
+    (detect_intraday_outlier_jumps) -> 8k_release -> ir_publication. One hop
+    answers most questions; two covers a full earnings cycle. An unfiltered
+    follow-up call re-pulls the whole cache.
 
     Optionally narrow results by `tickers`, `sector`, `industry`, or `market_cap`
-    (e.g. market_cap=["Large-cap","Mega-cap"]). Returns a list of event objects,
-    or an empty list when the cache is cold.
+    (e.g. market_cap=["Large-cap","Mega-cap"]). Returns a list of event objects.
+    An EMPTY list means the cache is cold for that event type (12h TTL), not
+    that nothing happened.
 
     Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
     retry. Omit only if the MCP client forwards an Authorization header.
