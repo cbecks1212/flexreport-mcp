@@ -57,30 +57,13 @@ def _decode_rs256(token: str) -> dict:
 
 
 class FlexReportTokenVerifier(TokenVerifier):
-    """Validate the backend's RS256 OAuth access tokens.
-
-    `lenient` (AUTH_MODE=both): tokens that fail RS256 validation are passed through
-    as opaque — the backend re-validates and 401s anything invalid. This keeps legacy
-    static-JWT (HS256) header users working during the transition without this service
-    ever holding the legacy secret. AUTH_MODE=oauth sets lenient=False (strict).
-    """
-
-    def __init__(self, lenient: bool):
-        self.lenient = lenient
+    """Validate the backend's RS256 OAuth access tokens (strict — nothing else passes)."""
 
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
             # JWKS lookup + decode are sync (network on cache-miss) — keep off the loop.
             claims = await anyio.to_thread.run_sync(_decode_rs256, token)
         except Exception:
-            if self.lenient:
-                return AccessToken(
-                    token=token,
-                    client_id="legacy",
-                    scopes=[],
-                    expires_at=None,
-                    resource=MCP_RESOURCE_URL,
-                )
             return None
         return AccessToken(
             token=token,

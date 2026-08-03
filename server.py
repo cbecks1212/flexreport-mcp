@@ -15,6 +15,7 @@ from typing import Any, Literal, Optional, get_args
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
 from starlette.responses import PlainTextResponse
 
 from client import MissingAuthError, auth_headers, get_client
@@ -23,41 +24,26 @@ from client import MissingAuthError, auth_headers, get_client
 # so the copy can be edited without touching the server logic.
 _TEXT = json.loads((Path(__file__).parent / "instructions.json").read_text())
 
-# Auth posture (env). Controls how inbound requests are authenticated:
-#   legacy → no token validation; agent self-serves via get_token/register_user
-#            (today's behavior). Deploying new code is a no-op until you flip this.
-#   both   → OAuth Resource Server: RS256 tokens validated against the backend JWKS,
-#            non-OAuth tokens passed through (legacy static-JWT users keep working),
-#            password tools removed. Transition state.
-#   oauth  → strict: only valid RS256 OAuth tokens accepted. End state.
-AUTH_MODE = os.environ.get("AUTH_MODE", "legacy").lower()
-_OAUTH_ENABLED = AUTH_MODE in ("oauth", "both")
+# Auth: OAuth 2.0 Resource Server, always on. The SDK serves
+# /.well-known/oauth-protected-resource and returns 401 + WWW-Authenticate challenges
+# pointing clients at the backend Authorization Server (issuer_url); only RS256 tokens
+# validated against the backend JWKS are accepted.
+from mcp.server.auth.settings import AuthSettings
 
-# Mode-aware auth playbook advertised to every client on connect (MCP `instructions`).
-_AUTH_BLOCK = _TEXT["auth_block_oauth"] if _OAUTH_ENABLED else _TEXT["auth_block_legacy"]
+from auth_verifier import (
+    MCP_RESOURCE_URL,
+    OAUTH_ISSUER,
+    FlexReportTokenVerifier,
+)
 
-INSTRUCTIONS = _TEXT["instructions"].replace("{auth_block}", _AUTH_BLOCK)
+INSTRUCTIONS = _TEXT["instructions"].replace("{auth_block}", _TEXT["auth_block_oauth"])
 
-# OAuth Resource-Server wiring (only when AUTH_MODE enables it). The SDK then serves
-# /.well-known/oauth-protected-resource and returns 401 + WWW-Authenticate challenges,
-# pointing clients at the backend Authorization Server (issuer_url).
-_auth_settings = None
-_token_verifier = None
-if _OAUTH_ENABLED:
-    from mcp.server.auth.settings import AuthSettings
-
-    from auth_verifier import (
-        MCP_RESOURCE_URL,
-        OAUTH_ISSUER,
-        FlexReportTokenVerifier,
-    )
-
-    _token_verifier = FlexReportTokenVerifier(lenient=(AUTH_MODE == "both"))
-    _auth_settings = AuthSettings(
-        issuer_url=OAUTH_ISSUER,
-        resource_server_url=MCP_RESOURCE_URL,
-        required_scopes=[],  # backend enforces scope/plan; don't gate at the transport
-    )
+_token_verifier = FlexReportTokenVerifier()
+_auth_settings = AuthSettings(
+    issuer_url=OAUTH_ISSUER,
+    resource_server_url=MCP_RESOURCE_URL,
+    required_scopes=[],  # backend enforces scope/plan; don't gate at the transport
+)
 # --- Discovery / metadata catalogues ---------------------------------------
 # One tool (`list_options`) enumerates valid parameter values (event types,
 # report override items, sectors, tickers, PDF tags, indicators, ...) instead
@@ -106,21 +92,12 @@ mcp = FastMCP(
     # Behind a load balancer (ALB): make each request self-contained instead of
     # holding a long-lived per-session SSE stream the LB would choke on, and return
     # plain JSON rather than text/event-stream. Stateless mode has no persistent
-    # session, so auth is per-call (an OAuth bearer, or legacy `bearer_token`), not a cache.
+    # session, so auth is per-call (the validated OAuth bearer), not a cache.
     stateless_http=True,
     json_response=True,
     auth=_auth_settings,
     token_verifier=_token_verifier,
 )
-
-
-def _pre_auth_tool(fn):
-    """Register the legacy password/registration tools only in AUTH_MODE=legacy.
-
-    Under OAuth these are dead (transport auth rejects the token-less connection they
-    relied on) and shouldn't be advertised — sign-in moves to the browser flow.
-    """
-    return mcp.tool()(fn) if not _OAUTH_ENABLED else fn
 
 
 def _inbound_request(ctx: Context):
@@ -134,15 +111,13 @@ async def _send(
     path: str,
     *,
     require_auth: bool = True,
-    bearer_token: Optional[str] = None,
     raw: bool = False,
     **kwargs: Any,
 ) -> Any:
     """Forward a request to the backend, returning parsed JSON or a structured error.
 
-    Auth (handled by auth_headers): explicit `bearer_token` (a JWT from `get_token`)
-    → the inbound Authorization header. On a 401 the message tells the agent to
-    re-authenticate with `get_token`.
+    Auth (handled by auth_headers): the validated inbound OAuth bearer is
+    forwarded to the backend on every call.
 
     With `raw=True`, a 2xx response's body is returned as bytes (for binary endpoints
     like a PDF download) instead of being parsed as JSON.
@@ -151,9 +126,7 @@ async def _send(
     an "error" key rather than raised, so the agent receives a clean, readable message.
     """
     try:
-        headers = auth_headers(
-            _inbound_request(ctx), required=require_auth, token=bearer_token
-        )
+        headers = auth_headers(_inbound_request(ctx), required=require_auth)
     except MissingAuthError as e:
         return {"error": str(e)}
 
@@ -169,7 +142,7 @@ async def _send(
             detail = resp.text
         msg = f"Backend returned HTTP {resp.status_code}"
         if resp.status_code == 401:
-            msg += " — not authenticated / token expired. Call `get_token` and pass the result as `bearer_token`."
+            msg += " — not authenticated / token expired. Your MCP client should re-run the OAuth sign-in flow."
         return {"error": msg, "detail": detail}
 
     if raw:
@@ -181,7 +154,7 @@ async def _send(
         return {"error": "Backend returned a non-JSON response", "detail": resp.text}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="List Real-Time Market Events", readOnlyHint=True))
 async def list_realtime_events(
     ctx: Context,
     event_type: str = "eps_update",
@@ -189,7 +162,6 @@ async def list_realtime_events(
     sector: Optional[list[str]] = None,
     industry: Optional[list[str]] = None,
     market_cap: Optional[list[str]] = None,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Pull live market events from the backend's Redis-backed cache (12h TTL).
 
@@ -211,8 +183,7 @@ async def list_realtime_events(
     An EMPTY list means the cache is cold for that event type (12h TTL), not
     that nothing happened.
 
-    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
-    retry. Omit only if the MCP client forwards an Authorization header.
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
     body: dict[str, Any] = {"event_type": event_type}
     if tickers:
@@ -223,16 +194,15 @@ async def list_realtime_events(
         body["industry"] = industry
     if market_cap:
         body["market_cap"] = market_cap
-    return await _send(ctx, "POST", "/get-realtime-events", json=body, bearer_token=bearer_token)
+    return await _send(ctx, "POST", "/get-realtime-events", json=body)
 
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Generate Bespoke Stock Report", readOnlyHint=False, destructiveHint=False))
 async def generate_report_for_stock(
     ctx: Context,
     ticker: str,
     overrides: Optional[dict] = None,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Build a NEW BESPOKE report on the fly for one ticker (slow, async; takes ~10 minutes).
 
@@ -262,8 +232,7 @@ async def generate_report_for_stock(
     Do NOT pass "include_transcript", "filing_frequency", "institutional_ownership", or
     price-date fields — the dynamic report builder ignores them.
 
-    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-    use the MCP client's configured Authorization header.
+
 
     This is asynchronous. The response is keyed by ticker, e.g.
     {"AAPL": {"task_id": "...", "status": "PENDING"}}. Read result["AAPL"]["task_id"]
@@ -272,16 +241,15 @@ async def generate_report_for_stock(
     """
     payload = {"ticker": ticker, **(overrides or {})}
     return await _send(
-        ctx, "POST", "/create-full-report", json=payload, bearer_token=bearer_token
+        ctx, "POST", "/create-full-report", json=payload
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Generate Research Report", readOnlyHint=False, destructiveHint=False))
 async def generate_research_report(
     ctx: Context,
     query: str,
     delivery: str = "email",
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Answer an OPEN-ENDED or THEMATIC research QUESTION (extensible, multi-section).
 
@@ -301,23 +269,20 @@ async def generate_research_report(
 
     `query` is natural language, e.g. "high-growth semis with rising estimates".
     `delivery` defaults to "email". Rate-limited to 20/hour per user server-side.
-    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-    use the MCP client's configured Authorization header.
 
     Asynchronous: returns {"task_id": "...", "status": "PENDING"}. Poll with
     `get_task_status` until SUCCESS, then read its `result`.
     """
     return await _send(
         ctx, "POST", "/generate-research-report",
-        json={"query": query, "delivery": delivery}, bearer_token=bearer_token,
+        json={"query": query, "delivery": delivery},
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Explore Data Catalogue", readOnlyHint=False, destructiveHint=False))
 async def explore_data_catalogue(
     ctx: Context,
     query: str,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Explore Flexreport's data platform with an OPEN-ENDED question — designed to handle many research based or open ended questions, enabling interactive EDA.
 
@@ -343,8 +308,7 @@ async def explore_data_catalogue(
     There is no `delivery` argument here: results always go to the dashboard so the user
     can interact with them. The job is rate-limited to 20/hour per user server-side.
 
-    `query` is natural language. `bearer_token` (a JWT from `get_token`) authenticates as
-    that user; omit it to use the MCP client's configured Authorization header.
+    `query` is natural language.
 
     Asynchronous: returns {"task_id": "...", "status": "PENDING"}. Poll a SINGLE task
     with `get_task_status` until SUCCESS (the result is a plain dict — there is NO nested
@@ -363,11 +327,11 @@ async def explore_data_catalogue(
     """
     return await _send(
         ctx, "POST", "/data-catalogue-exploration",
-        json={"query": query}, bearer_token=bearer_token,
+        json={"query": query},
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Get Async Task Status", readOnlyHint=True))
 async def get_task_status(ctx: Context, task_id: str) -> Any:
     """Poll the status of an async job (generate_research_report, explore_data_catalogue, screen_stocks, ...).
 
@@ -380,11 +344,10 @@ async def get_task_status(ctx: Context, task_id: str) -> Any:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Get Latest Cached Reports", readOnlyHint=True))
 async def get_latest_report(
     ctx: Context,
     symbols: list[str],
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Get the latest Flexreport research report(s) for one or more tickers. USE THIS BY DEFAULT.
 
@@ -403,27 +366,25 @@ async def get_latest_report(
     {"result": [{"symbol": "AAPL", "url": "<presigned pdf url>",
                  "report": "<base64 pdf>"}, ...],
     "missing": ["XYZ", ...]}. Each hit carries BOTH representations of the same
-    PDF: `url` is a short-lived presigned link (valid ~6h) — hand it to the user
+    PDF: `url` is a short-lived presigned link (valid ~12h) — hand it to the user
     to download/open the document directly (and prefer it on clients that can't
     handle a large base64 blob); `report` is the inline base64 PDF — decode it to
     read, render, or summarize the report's contents yourself. `missing` lists
     symbols with no cached report (for those, the user may want `onboard_symbol`
     to add coverage). Symbols are normalized (uppercased, de-duplicated) by
     the backend.
-    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-    use the MCP client's configured Authorization header.
+
     """
     return await _send(
-        ctx, "POST", "/get-cached-reports", json=symbols, bearer_token=bearer_token
+        ctx, "POST", "/get-cached-reports", json=symbols
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Download Report PDF", readOnlyHint=True))
 async def download_pdf_from_url(
     ctx: Context,
     url: str,
     file_name: str,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Fetch a presigned S3 PDF URL server-side and return the document as base64.
 
@@ -440,13 +401,11 @@ async def download_pdf_from_url(
     {"file_name": ..., "media_type": "application/pdf", "report": "<base64 pdf>"} —
     decode `report` to read, render, or save the PDF.
 
-    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
-    retry. Omit only if the MCP client forwards an Authorization header.
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
     pdf = await _send(
         ctx, "POST", "/download-pdf-from-url",
-        json={"url": url, "file_name": file_name},
-        bearer_token=bearer_token, raw=True,
+        json={"url": url, "file_name": file_name}, raw=True,
     )
     if isinstance(pdf, dict):  # _send returned a structured error, pass it through
         return pdf
@@ -457,7 +416,7 @@ async def download_pdf_from_url(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="List Valid Parameter Options", readOnlyHint=True))
 async def list_options(ctx: Context, kind: _OptionKind) -> Any:
     """Enumerate the valid values for a parameter, straight from the backend.
 
@@ -500,7 +459,7 @@ async def list_options(ctx: Context, kind: _OptionKind) -> Any:
     return await _send(ctx, "GET", _OPTION_ENDPOINTS[kind], require_auth=False)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="List Sub-Industries", readOnlyHint=True))
 async def list_sub_industries(ctx: Context, sectors: list[str]) -> Any:
     """List the sub-industries within one or more sectors.
 
@@ -513,13 +472,12 @@ async def list_sub_industries(ctx: Context, sectors: list[str]) -> Any:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Build Full-Width PDF", readOnlyHint=False, destructiveHint=False))
 async def build_pdf_full_width(
     ctx: Context,
     document_structure: dict,
     font: str = "Times-Roman",
     font_size: int = 10,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Render a tagged `document_structure` into a full-width PDF and return a link.
 
@@ -550,23 +508,20 @@ async def build_pdf_full_width(
     non-empty list means one or more blocks (usually a figure/image) were dropped
     or rendered degraded.
 
-    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
-    retry. Omit only if the MCP client forwards an Authorization header.
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
     return await _send(
         ctx, "POST", "/create-pdf",
         json={"document_structure": document_structure, "font": font, "font_size": font_size},
-        bearer_token=bearer_token,
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Build Sidebar PDF", readOnlyHint=False, destructiveHint=False))
 async def build_pdf_sidebar(
     ctx: Context,
     document_structure: dict,
     font: str = "Times-Roman",
     font_size: int = 10,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Render a tagged `document_structure` into a sidebar-layout PDF and return a link.
 
@@ -593,17 +548,15 @@ async def build_pdf_sidebar(
     pull the bytes inline on clients that can't open the link. CHECK `warnings`: a
     non-empty list means one or more blocks were dropped or rendered degraded.
 
-    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
-    retry. Omit only if the MCP client forwards an Authorization header.
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
     return await _send(
         ctx, "POST", "/create-pdf-sidebar",
         json={"document_structure": document_structure, "font": font, "font_size": font_size},
-        bearer_token=bearer_token,
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Get Company Snapshot", readOnlyHint=True))
 async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
     """Fetch a structured, POINT-IN-TIME company snapshot — no report generation needed.
 
@@ -635,14 +588,13 @@ async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Get Technical Indicator Data", readOnlyHint=True))
 async def get_technical_indicator_data(
     ctx: Context,
     symbol: str,
     indicator: str,
     start_date: str,
     end_date: str,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Fetch a historical technical-indicator series for a symbol over a date range.
 
@@ -654,8 +606,7 @@ async def get_technical_indicator_data(
     Returns a list of daily records (each row's columns vary by indicator), ordered by
     date, or an empty list when there's no data in the range.
 
-    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
-    retry. Omit only if the MCP client forwards an Authorization header.
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
     return await _send(
         ctx, "GET", "/technical-indicator-endpoint",
@@ -665,11 +616,10 @@ async def get_technical_indicator_data(
             "start_date": start_date,
             "end_date": end_date,
         },
-        bearer_token=bearer_token,
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Detect Intraday Outlier Jumps", readOnlyHint=True))
 async def detect_intraday_outlier_jumps(
     ctx: Context,
     symbol: str,
@@ -677,7 +627,6 @@ async def detect_intraday_outlier_jumps(
         "one_minute", "five_minute", "thirty_minute", "one_hour", "four_hour"
     ] = "one_minute",
     zscore_threshold: float = 2.0,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Live look at TODAY's intraday tape, flagging outlier price jumps.
 
@@ -693,13 +642,11 @@ async def detect_intraday_outlier_jumps(
     directly (no task id to poll). Returns a 404-style error if no intraday data is
     available yet (e.g. before the market opens or for an uncovered symbol).
 
-    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and retry.
-    Omit only if the MCP client forwards an Authorization header.
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
     return await _send(
         ctx, "GET", "/detect-intraday-outlier-jumps",
         params={"symbol": symbol, "frequency": frequency, "zscore_threshold": zscore_threshold},
-        bearer_token=bearer_token,
     )
 
 
@@ -709,7 +656,6 @@ async def _query_aftermarket(
     symbols: list[str],
     start_datetime: Optional[str],
     end_datetime: Optional[str],
-    bearer_token: Optional[str],
 ) -> Any:
     """Build the AftermarketQuery body and forward it to a stored-data endpoint.
 
@@ -721,16 +667,15 @@ async def _query_aftermarket(
         body["start_datetime"] = start_datetime
     if end_datetime:
         body["end_datetime"] = end_datetime
-    return await _send(ctx, "POST", path, json=body, bearer_token=bearer_token)
+    return await _send(ctx, "POST", path, json=body)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Get Aftermarket Trades", readOnlyHint=True))
 async def get_aftermarket_trades(
     ctx: Context,
     symbols: list[str],
     start_datetime: Optional[str] = None,
     end_datetime: Optional[str] = None,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Query STORED aftermarket (extended-hours) TRADE data for symbols over a datetime range.
 
@@ -745,22 +690,20 @@ async def get_aftermarket_trades(
     defaults to the start (00:00:00) and end (23:59:59) of today in ET, so leave
     them off for "today's aftermarket trades".
 
-    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
-    retry. Omit only if the MCP client forwards an Authorization header. Rate-limited
+    Requires auth (your MCP client attaches the OAuth bearer automatically). Rate-limited
     to 300/minute per user server-side.
     """
     return await _query_aftermarket(
-        ctx, "/get-aftermarket-trades", symbols, start_datetime, end_datetime, bearer_token
+        ctx, "/get-aftermarket-trades", symbols, start_datetime, end_datetime
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Get Aftermarket Quotes", readOnlyHint=True))
 async def get_aftermarket_quotes(
     ctx: Context,
     symbols: list[str],
     start_datetime: Optional[str] = None,
     end_datetime: Optional[str] = None,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Query STORED aftermarket (extended-hours) QUOTE data for symbols over a datetime range.
 
@@ -774,37 +717,34 @@ async def get_aftermarket_quotes(
     defaults to the start (00:00:00) and end (23:59:59) of today in ET, so leave
     them off for "today's aftermarket quotes".
 
-    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
-    retry. Omit only if the MCP client forwards an Authorization header. Rate-limited
+    Requires auth (your MCP client attaches the OAuth bearer automatically). Rate-limited
     to 300/minute per user server-side.
     """
     return await _query_aftermarket(
-        ctx, "/get-aftermarket-quotes", symbols, start_datetime, end_datetime, bearer_token
+        ctx, "/get-aftermarket-quotes", symbols, start_datetime, end_datetime
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Onboard New Symbol", readOnlyHint=False, destructiveHint=False))
 async def onboard_symbol(
     ctx: Context,
     symbol: str,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Request onboarding of a NOT-yet-covered ticker (mutating, authenticated).
 
     Kicks off a 30-60 min backend workflow and emails the authenticated user when
     the first report is ready. Rate-limited to 5/hour per user. Use only when a
     symbol is missing from `list_options("tickers")` / returns no data elsewhere.
-    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-    use the MCP client's configured Authorization header.
+
 
     Returns {"task_id": ..., "status": "PENDING"}.
     """
     return await _send(
         ctx, "POST", "/onboard-symbol",
-        params={"symbol": symbol}, bearer_token=bearer_token,
+        params={"symbol": symbol},
     )
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Screen Stocks", readOnlyHint=False, destructiveHint=False))
 async def screen_stocks(
     ctx: Context,
     metrics: Optional[dict[str, bool | float]] = None,
@@ -815,7 +755,6 @@ async def screen_stocks(
     institutional_ownership: Optional[dict[str, float]] = None,
     countries: Optional[list[str]] = None,
     price_performance: Optional[dict[str, float]] = None,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Screen stocks by financial growth, sector, sub-industry, market cap, analyst ratings, institutional ownership, country, and price performance.
 
@@ -823,8 +762,7 @@ async def screen_stocks(
     Discover valid values with the list tools: `list_options` (e.g.
     kind="sectors", "institutional_investor_types") and `list_sub_industries`.
 
-    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-    use the MCP client's configured Authorization header. Rate-limited to 10/hour
+    Rate-limited to 10/hour
     per user server-side.
 
     Asynchronous: returns a task id. Poll it with `get_task_status` until SUCCESS.
@@ -841,15 +779,13 @@ async def screen_stocks(
             "countries": countries,
             "price_performance": price_performance,
         },
-        bearer_token=bearer_token,
     )
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Optimize Portfolio (Fast)", readOnlyHint=True))
 async def optimize_portfolio_default(
     ctx: Context,
     symbols: list[str],
     risk_tolerance: Optional[Literal["conservative", "balanced", "aggressive"]] = None,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Build a risk-optimized portfolio from a list of tickers — fast, synchronous, no LLM.
 
@@ -862,8 +798,7 @@ async def optimize_portfolio_default(
     universe (`list_options("tickers")`); unsupported tickers come back in `missing`, and
     in-universe tickers with too little price history come back in `dropped`.
 
-    No auth required (public endpoint). `bearer_token` (a JWT from `get_token`) is
-    still forwarded if supplied, but is optional here.
+    No auth required (public endpoint).
 
     Synchronous. Returns:
       {"status": "OK",  # or "SKIPPED"/"EMPTY" when too few usable symbols remain
@@ -879,18 +814,16 @@ async def optimize_portfolio_default(
             "symbols": symbols,
             "risk_tolerance": risk_tolerance,
         },
-        bearer_token=bearer_token,
         require_auth=False,
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Optimize Portfolio (LLM-Curated)", readOnlyHint=False, destructiveHint=False))
 async def optimize_portfolio(
     ctx: Context,
     symbols: list[str],
     risk_tolerance: Optional[Literal["conservative", "balanced", "aggressive"]] = None,
     delivery: Optional[str] = "dashboard",
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Build a risk-optimized portfolio from a non-empty list of tickers.
 
@@ -899,8 +832,7 @@ async def optimize_portfolio(
     profile is recommended. `delivery` is the result channel — "dashboard"
     (returned directly) or "email".
 
-    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-    use the MCP client's configured Authorization header. Rate-limited to 10/hour
+    Rate-limited to 10/hour
     per user server-side.
 
     Asynchronous: returns {"task_id": ..., "status": "PENDING", "supported": [...],
@@ -913,11 +845,10 @@ async def optimize_portfolio(
             "risk_tolerance": risk_tolerance,
             "delivery": delivery,
         },
-        bearer_token=bearer_token,
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Get Stock Picks", readOnlyHint=True))
 async def get_stock_picks(
     ctx: Context,
     strategy_name: Optional[str] = None,
@@ -951,11 +882,10 @@ StrategyBook = Literal[
 ]
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Get Strategy Performance Summary", readOnlyHint=True))
 async def get_strategy_performance_summary(
     ctx: Context,
     amount: float = 1.0,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Leaderboard of since-inception performance vs the S&P 500 for all strategy books.
 
@@ -970,24 +900,20 @@ async def get_strategy_performance_summary(
     invested at inception would be worth in the strategy vs the S&P 500).
 
     Drill into one book's full daily series with `get_strategy_track_record`, or its
-    per-trade adds/drops with `get_strategy_swaps`. `bearer_token` (a JWT from
-    `get_token`) authenticates as that user; omit it to use the MCP client's configured
-    Authorization header.
+    per-trade adds/drops with `get_strategy_swaps`.
     """
     return await _send(
         ctx, "GET", "/get-strategy-performance-summary",
         params={"amount": amount},
-        bearer_token=bearer_token,
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Get Strategy Track Record", readOnlyHint=True))
 async def get_strategy_track_record(
     ctx: Context,
     strategy_name: StrategyBook,
     book: Literal["llm", "mechanical"] = "llm",
     amount: float = 1.0,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Since-inception daily track record vs the S&P 500 for ONE strategy book.
 
@@ -1006,22 +932,18 @@ async def get_strategy_track_record(
 
     Backend returns 404 when the chosen book has no performance history yet. For the
     cross-book leaderboard use `get_strategy_performance_summary`; for the current
-    holdings themselves use `get_stock_picks`. `bearer_token` (a JWT from `get_token`)
-    authenticates as that user; omit it to use the MCP client's configured
-    Authorization header.
+    holdings themselves use `get_stock_picks`.
     """
     return await _send(
         ctx, "GET", "/get-strategy-track-record",
         params={"strategy_name": strategy_name, "book": book, "amount": amount},
-        bearer_token=bearer_token,
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Get Strategy Swap Ledger", readOnlyHint=True))
 async def get_strategy_swaps(
     ctx: Context,
     strategy_name: StrategyBook,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Per-trade swap ledger (adds/drops) vs the S&P 500 for ONE strategy book.
 
@@ -1038,30 +960,26 @@ async def get_strategy_swaps(
     net_swap_value_add}}.
 
     `strategy_name` is one of the four strategies or "pooled". For the book-level
-    return series use `get_strategy_track_record`. `bearer_token` (a JWT from
-    `get_token`) authenticates as that user; omit it to use the MCP client's
-    configured Authorization header.
+    return series use `get_strategy_track_record`.
     """
     return await _send(
         ctx, "GET", "/get-strategy-swaps",
         params={"strategy_name": strategy_name},
-        bearer_token=bearer_token,
     )
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Predict Post-Earnings Move", readOnlyHint=True))
 async def predict_earnings_move(
     ctx: Context,
     symbols: list[str],
-    bearer_token: Optional[str] = None
 )-> Any:
     """
     Predict the magnitude of a stock's move, post-earnings announcement. Returns a list of possibilities, modelling the magnitude under each scenario e.g. if stock beats and raises guidance then expect a 6% magnitude move.
     """
     return await _send(
-        ctx, "POST", "/predict-earnings-announcement-move", json={"symbols" : symbols }, bearer_token=bearer_token
+        ctx, "POST", "/predict-earnings-announcement-move", json={"symbols" : symbols }
     )
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Schedule Recurring Task", readOnlyHint=False, destructiveHint=False))
 async def schedule_task(
     ctx: Context,
     task_name: str,
@@ -1071,7 +989,6 @@ async def schedule_task(
     regular_cron: Optional[str] = None,
     custom_cron: Optional[str] = None,
     bulk_subscribe: bool = False,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Schedule a RECURRING delivery (cron job) of a report, screen, research answer, or events.
 
@@ -1120,8 +1037,7 @@ async def schedule_task(
     server-side. `bulk_subscribe=True` subscribes a wider audience instead of just
     the caller — leave it False unless the user explicitly asks.
 
-    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-    use the MCP client's configured Authorization header. Returns 201 on success.
+    Returns 201 on success.
     """
     if frequency == "custom" and not (regular_cron or custom_cron):
         return {"error": "When frequency='custom', supply regular_cron (a 5-field "
@@ -1147,14 +1063,13 @@ async def schedule_task(
     if custom_cron:
         body["custom_cron"] = custom_cron
     return await _send(
-        ctx, "POST", "/schedule-task", json=body, bearer_token=bearer_token
+        ctx, "POST", "/schedule-task", json=body
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="List Scheduled Tasks", readOnlyHint=True))
 async def list_scheduled_tasks(
     ctx: Context,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """List the caller's scheduled tasks (cron jobs created via `schedule_task`).
 
@@ -1163,17 +1078,15 @@ async def list_scheduled_tasks(
      "last_run_at", "total_run_count"}. Use `name` as the key to remove a job with
     `delete_scheduled_task`.
 
-    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-    use the MCP client's configured Authorization header.
+
     """
-    return await _send(ctx, "GET", "/get-scheduled-tasks", bearer_token=bearer_token)
+    return await _send(ctx, "GET", "/get-scheduled-tasks")
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Delete Scheduled Task", readOnlyHint=False, destructiveHint=True, idempotentHint=True))
 async def delete_scheduled_task(
     ctx: Context,
     task_name: str,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """Delete a scheduled task (cron job) by its name.
 
@@ -1181,15 +1094,14 @@ async def delete_scheduled_task(
     `task_name` used when the job was created via `schedule_task`). Returns
     {"msg": "<task_name> deleted"} on success, or an error if no such task exists.
 
-    `bearer_token` (a JWT from `get_token`) authenticates as that user; omit it to
-    use the MCP client's configured Authorization header.
+
     """
     return await _send(
         ctx, "DELETE", "/delete-scheduled-task",
-        params={"task_name": task_name}, bearer_token=bearer_token,
+        params={"task_name": task_name},
     )
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="List Earnings Announcements", readOnlyHint=True))
 async def list_earnings_announcements(
     ctx: Context,
     start_date: Optional[str] = None,
@@ -1198,7 +1110,6 @@ async def list_earnings_announcements(
     industry: Optional[list[str]] = None,
     sector: Optional[list[str]] = None,
     market_cap: Optional[list[str]] = None,
-    bearer_token: Optional[str] = None,
 ) -> Any:
     """List scheduled earnings announcements within a date window, Flexreport names only.
 
@@ -1217,8 +1128,7 @@ async def list_earnings_announcements(
 
     Returns a list of announcement records (empty list when nothing matches).
 
-    Requires auth: pass `bearer_token` (a JWT from `get_token`); on 401 re-mint and
-    retry. Omit only if the MCP client forwards an Authorization header.
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
     body: dict[str, Any] = {}
     if start_date:
@@ -1234,10 +1144,10 @@ async def list_earnings_announcements(
     if market_cap:
         body["market_cap"] = market_cap
     return await _send(
-        ctx, "POST", "/list-upcoming-earnings-announcements", json=body, bearer_token=bearer_token
+        ctx, "POST", "/list-upcoming-earnings-announcements", json=body
     )
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Check Market Open Status", readOnlyHint=True))
 async def is_market_open(ctx: Context, exchange: str = "NYSE") -> Any:
     """Check whether an exchange is currently open — a cheap routing helper.
 
@@ -1268,11 +1178,11 @@ async def is_market_open(ctx: Context, exchange: str = "NYSE") -> Any:
 # in Stripe. This service never touches card or account details; the caller's
 # forwarded bearer identifies the user, so neither tool takes any arguments.
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Upgrade Plan", readOnlyHint=False, destructiveHint=False))
 async def upgrade_plan(ctx: Context) -> str:
     """Get a secure link for the user to upgrade or change their Flexreport Finance plan (e.g. to raise their request limit). Returns a checkout link — the user completes payment in their browser. Call this whenever the user asks to upgrade, subscribe, pay for, or change their plan, or when they've hit a usage/quota limit."""
     # /payment/upgrade-link is quota-exempt, so this is safe even after a 429.
-    # _send forwards the caller's inbound bearer token (no bearer_token arg needed).
+    # _send forwards the caller's inbound bearer token.
     data = await _send(ctx, "GET", "/payment/upgrade-link")
     if not isinstance(data, dict) or data.get("error") or not data.get("url"):
         return ("Sorry, I couldn't generate an upgrade link just now. "
@@ -1294,10 +1204,10 @@ async def upgrade_plan(ctx: Context) -> str:
     return "\n\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Manage Billing", readOnlyHint=False, destructiveHint=False))
 async def manage_billing(ctx: Context) -> str:
     """Get a link to the Stripe billing portal where the user can view invoices, update their card, or cancel their subscription. Use when the user asks to manage, change, or cancel their billing/subscription."""
-    # _send forwards the caller's inbound bearer token (no bearer_token arg needed).
+    # _send forwards the caller's inbound bearer token.
     data = await _send(ctx, "GET", "/payment/portal-link")
     if isinstance(data, dict) and data.get("url") and not data.get("error"):
         return f"👉 [Manage your billing]({data['url']})"
@@ -1310,60 +1220,6 @@ async def manage_billing(ctx: Context) -> str:
             "Please try again in a moment.")
 
 
-# --- Auth / registration --------------------------------------------------
-# Pre-auth flows (no JWT yet). See the server `instructions` for the full playbook.
-#
-#   New user:      register_user(email, password)  -> backend emails a link/token
-#                  confirm_registration(token)      -> (or user clicks the link)
-#                  get_token(email, password)        -> access_token
-#   Existing user: get_token(email, password)        -> access_token
-#
-# Then pass access_token as `bearer_token` on every data tool. Stateless deployment,
-# so there is no server-side session/login cache — the token rides each call.
-
-@_pre_auth_tool
-async def register_user(ctx: Context, email: str, password: str) -> Any:
-    """Register a new Flexreport account (step 1 for new users).
-
-    Pre-auth — no JWT required. The backend emails a confirmation link/token; the
-    user clicks the link (or pastes the token to `confirm_registration`) to
-    activate, then call `get_token` to obtain a JWT.
-
-    Note: `password` is sent as a tool argument, so it appears in call logs.
-    """
-    return await _send(
-        ctx, "POST", "/auth",
-        json={"email": email, "password": password}, require_auth=False,
-    )
-
-
-@_pre_auth_tool
-async def confirm_registration(ctx: Context, token: str) -> Any:
-    """Confirm a registration with the emailed token (step 2 of the auth flow).
-
-    Pre-auth — no JWT required. `token` is the value emailed by `register_user`.
-    """
-    return await _send(ctx, "GET", f"/confirm/{token}", require_auth=False)
-
-
-@_pre_auth_tool
-async def get_token(ctx: Context, username: str, password: str) -> Any:
-    """Exchange credentials for a bearer JWT (OAuth2 password flow). Pre-auth.
-
-    THE login step. A new user calls this after confirming registration; an
-    existing user calls it directly. `username` is the account email.
-
-    Returns {"access_token": "<jwt>", "token_type": "bearer"}. Pass the
-    `access_token` as the `bearer_token` argument on every authenticated tool
-    (list_realtime_events, get_latest_report, generate_research_report,
-    explore_data_catalogue, onboard_symbol). Re-call this and retry on a 401.
-
-    Note: `password` is sent as a tool argument, so it appears in call logs.
-    """
-    return await _send(
-        ctx, "POST", "/token",
-        data={"username": username, "password": password}, require_auth=False,
-    )
 
 
 @mcp.custom_route("/health", methods=["GET"])

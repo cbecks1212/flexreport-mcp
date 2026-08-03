@@ -1,11 +1,13 @@
 # flexreport-mcp
 
 A standalone **MCP microservice** that exposes the [FlexReport](https://app.flexreportfinapi.com/api-docs)
-equity backend's **live events** and **research-report artifacts** as on-demand
-tools for Claude (and any MCP client).
+equity backend's **live events**, **research-report artifacts**, and **database of
+750M+ datapoints** as on-demand tools for Claude (and any MCP client).
 
-It lets AI agents pull in real-time market events and research on demand, so they
-can surface the insights that matter most to you.
+It supercharges AI agents with real-time market events and curated, golden-source
+data spanning fundamentals, transcripts, filings, insider trades (Forms 3, 4, and 5),
+ratios, macro data, IR decks pulled straight from each company's investor relations
+site, and more.
 
 ## Quick Install
 
@@ -19,6 +21,14 @@ Then start Claude and just ask (e.g. *"pull the biggest movers from flexreport"*
 On the first data call your MCP client runs an OAuth sign-in in your browser —
 sign in or register when prompted; you never paste a token. Add `--scope user` to
 make it available in every directory. See [Auth](#auth) for details.
+
+## Use-cases
+
+1. Analyze real-time SEC 8-K filings, while also pulling in investor relations decks and 5-minute bars to quickly identify stocks making meaningful moves: *"What are the latest 8-K releases? Highlight the most significant ones, pull the accompanying investor relations releases via FlexReport, chart 5-minute bars for any names making meaningful moves, and tell me how they align with each company's current state. I would like this in tabular format: 8-K summary, company trend, FlexReport 8-K analysis S3 link, IR deck link."*
+
+2. Predict upcoming earnings volatility, pulling in simple and exponential moving averages and Bollinger Bands, and creating a bespoke investment memo: *"Predict tomorrow's upcoming earnings volatility, highlighting the stocks slated for the biggest moves; chart their simple and exponential moving averages and Bollinger Bands; and highlight the biggest fundamental drivers right now, putting this all in an investment memo for my team."*
+
+3. Run thematic research on a market narrative: *"The AI trade has cooled recently, largely due to CapEx concerns and return on investment. I believe this has happened before, in the fall of 2025. Can you confirm, and what were the factors that allayed those concerns? Was it management commentary, continued demand for AI services, robust profitability and higher guidance? Please put together an in-depth report with FlexReport Finance."*
 
 ## Tools
 
@@ -38,15 +48,10 @@ make it available in every directory. See [Auth](#auth) for details.
 | `get_aftermarket_trades(symbols, start_datetime, end_datetime)` | `POST /get-aftermarket-trades` | Query **stored** extended-hours trade ticks for symbols over an ET datetime range (defaults to today, authed, 300/min) |
 | `get_aftermarket_quotes(symbols, start_datetime, end_datetime)` | `POST /get-aftermarket-quotes` | Query **stored** extended-hours bid/ask quote ticks for symbols over an ET datetime range (defaults to today, authed, 300/min) |
 | `onboard_symbol(symbol)` | `POST /onboard-symbol` | Request onboarding of an uncovered ticker (async, authed, 5/hour) |
-| `register_user(email, password)` | `POST /auth` | Register for an API key; backend emails a confirmation token (pre-auth, **`AUTH_MODE=legacy` only**) |
-| `confirm_registration(token)` | `GET /confirm/{token}` | Confirm a registration with the emailed token (pre-auth, **`AUTH_MODE=legacy` only**) |
-| `get_token(username, password)` | `POST /token` | Exchange credentials for a bearer JWT (OAuth2 password flow, pre-auth, **`AUTH_MODE=legacy` only**) |
 
 Typical agent loop: default to `explore_data_catalogue(query)` for open-ended/exploratory questions (fast, interactive charts/tables). Escalate only on a crystal-clear intent — `get_latest_report(symbols)` for the existing report on a named ticker, `screen_stocks(...)` to filter the universe, or `generate_research_report(query)` for an explicit deep dive (~10-12 min, async — **poll** with `get_task_status`).
 
 > **Note:** `generate_report` (bespoke on-the-fly `POST /create-full-report`) is currently **commented out** in `server.py` — it overlapped with the routes above and caused mis-routing. The backend endpoint is unchanged; re-enable by uncommenting the tool.
-
-Auth resolution per call: explicit `bearer_token` arg → the inbound `Authorization` header.
 
 ## Run locally
 
@@ -65,11 +70,12 @@ friendly), so auth rides each call. It holds **no credentials and no signing
 secret** — it validates the inbound bearer token and forwards it to the backend,
 which enforces scope, plan, and quota.
 
-### How it works (OAuth)
+### How it works
 
 Sign-in is a standard browser **authorization-code + PKCE** flow, run by your MCP
 client (e.g. Claude) against the FlexReport backend, which is the **Authorization
-Server**. You never paste or type a token:
+Server**. Register or sign in with an email + password, or use **Google
+Sign-In** — you never paste or type a token:
 
 1. On a request without a valid token the server returns `401` with a
    `WWW-Authenticate` challenge and serves Protected Resource Metadata at
@@ -82,43 +88,23 @@ Server**. You never paste or type a token:
    re-runs the flow.
 
 The server never sees your password and never holds the signing key — it stays a
-credential-free proxy.
-
-### Modes — `AUTH_MODE` (env)
-
-| `AUTH_MODE` | Behavior |
-|---|---|
-| `legacy` | No token validation. The agent self-serves credentials via the `register_user` / `confirm_registration` / `get_token` tools (password passed as a tool arg). Original behavior; those pre-auth tools are registered **only** in this mode. |
-| `both` | **OAuth Resource Server (prod today).** RS256 OAuth tokens are validated against the backend JWKS; tokens that fail RS256 are passed through as opaque, so legacy static-JWT users keep working while the backend re-validates them. Password tools removed. Transition state. |
-| `oauth` | Strict end state. Only valid RS256 OAuth tokens are accepted. |
+credential-free proxy. Only valid RS256 OAuth tokens are accepted; there is no
+password or static-JWT fallback.
 
 ### Config (env)
 
 | Var | Default | Purpose |
 |---|---|---|
-| `AUTH_MODE` | `legacy` | Selects the posture above |
 | `OAUTH_ISSUER` | `https://app.flexreportfinapi.com` | Expected token `iss` + advertised authorization server. **Must match the backend's `iss`** — prod uses the root domain `https://flexreportfinapi.com`. |
 | `OAUTH_AUDIENCE` | = `OAUTH_ISSUER` | Expected token `aud`. Set both sides to the canonical MCP URL for true audience binding. |
 | `OAUTH_JWKS_URL` | `{issuer}/.well-known/jwks.json` | Where public keys are fetched (decoupled from issuer for container networking). |
 | `MCP_RESOURCE_URL` | `https://mcp.flexreportfinapi.com/mcp` | This server's canonical resource identifier (the PRM `resource`). |
 
-### Static header (any mode)
+### Static header
 
-Configure `Authorization: Bearer <token>` in your MCP client and the server
-forwards it verbatim — an OAuth access token under `both`/`oauth`, or a legacy
-JWT under `legacy`. An explicit `bearer_token` tool arg always takes precedence
-over the inbound header. Nothing is stored at rest; tokens are forwarded per-call.
-
-### Legacy agent-driven path (`AUTH_MODE=legacy` only)
-
-The original flow, kept for backward compatibility and being retired in favor of
-OAuth (it sends the password as a tool argument, so it lands in call logs):
-
-- *New user:* `register_user(email, password)` → click the emailed link (or paste
-  the token to `confirm_registration`) → `get_token(email, password)`.
-- *Existing user:* `get_token(email, password)`.
-- The agent passes the returned `access_token` as the `bearer_token` arg on every
-  data tool and re-mints on a `401`.
+Configure `Authorization: Bearer <OAuth access token>` in your MCP client and the
+server validates and forwards it like any other call — useful for testing with a
+token minted elsewhere. Nothing is stored at rest; tokens are forwarded per-call.
 
 ## Wire into an MCP client
 
@@ -130,7 +116,7 @@ OAuth (it sends the password as a tool argument, so it lands in call logs):
     "flexreport": {
       "type": "http",
       "url": "http://localhost:8000/mcp",
-      "headers": { "Authorization": "Bearer <YOUR_JWT>" }
+      "headers": { "Authorization": "Bearer <YOUR_OAUTH_ACCESS_TOKEN>" }
     }
   }
 }
@@ -140,13 +126,13 @@ OAuth (it sends the password as a tool argument, so it lands in call logs):
 
 ```bash
 npx @modelcontextprotocol/inspector
-# Connect to http://localhost:8000/mcp with header Authorization: Bearer <JWT>
-# Confirm the tools list loads (count varies by AUTH_MODE — legacy adds the 3 pre-auth tools), then exercise:
+# Connect to http://localhost:8000/mcp with header Authorization: Bearer <OAuth access token>
+# Confirm the tools list loads (32 tools), then exercise:
 #   list_realtime_events("eps_update")        -> events (or [])
 #   get_latest_report(["AAPL"])               -> presigned PDF url (or missing)  [named-ticker report]
 #   explore_data_catalogue("MU EPS growth last 8 quarters")  -> task_id  [default exploratory route]
 #   get_task_status(task_id)                  -> eventually SUCCESS
-# Negative: call any JWT tool with no token   -> clean {"error": ...}, no crash
+# Negative: connect with no/invalid token     -> 401 + WWW-Authenticate challenge
 ```
 
 ## Deploy
