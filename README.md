@@ -145,3 +145,10 @@ its own task definition), independent of the API and Celery workers. Set
 docker build -t flexreport-mcp .
 docker run -p 8000:8000 -e API_BASE_URL=https://flexreportfinapi.com flexreport-mcp
 ```
+
+## Privacy
+
+FlexReport's privacy policy — what's collected, retention windows, and the
+third parties involved — is published at
+[app.flexreportfinapi.com/privacy](https://app.flexreportfinapi.com/privacy)
+(source: [PRIVACY.md](PRIVACY.md)).
