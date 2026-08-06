@@ -979,91 +979,85 @@ async def predict_earnings_move(
         ctx, "POST", "/predict-earnings-announcement-move", json={"symbols" : symbols }
     )
 
-@mcp.tool(annotations=ToolAnnotations(title="Schedule Recurring Task", readOnlyHint=False, destructiveHint=False))
+@mcp.tool(annotations=ToolAnnotations(title="Schedule Recurring Workflow", readOnlyHint=False, destructiveHint=False))
 async def schedule_task(
     ctx: Context,
-    task_name: str,
-    task_type: Literal["report", "screener", "research", "events"],
-    instructions: dict,
-    frequency: Literal["daily", "weekly", "monthly", "quarterly", "custom"] = "weekly",
-    regular_cron: Optional[str] = None,
-    custom_cron: Optional[str] = None,
-    bulk_subscribe: bool = False,
+    name: str,
+    steps: list[dict],
+    regular_cron: str,
+    delivery: Literal["email", "dashboard"] = "email",
+    description: Optional[str] = None,
 ) -> Any:
-    """Schedule a RECURRING delivery (cron job) of a report, screen, research answer, or events.
+    """Save a multi-step WORKFLOW (upsert by `name`) and attach a recurring cron
+    schedule for its delivery.
 
-    Use this when the user wants something delivered ON A SCHEDULE / repeatedly
-    (e.g. "send me the AAPL report every Monday", "screen for cheap large-cap
-    industrials monthly", "email me eps updates each morning"). For a ONE-OFF
-    request, call the corresponding tool directly instead (get_latest_report,
-    screen_stocks, generate_research_report, explore_data_catalogue,
-    list_realtime_events).
+    Use this when the user wants a sequence of platform calls delivered ON A
+    SCHEDULE / repeatedly (e.g. "every weekday morning pull 8-K releases, screen
+    for cheap large-caps, and email me the overlaps as a table"). For a ONE-OFF
+    request, call the corresponding tools directly instead.
 
-    `task_name` is a human label for the job (also its delete/lookup key).
+    `name` is a lowercase slug (pattern ^[a-z0-9][a-z0-9_-]{0,63} — no spaces,
+    colons, or uppercase) and the upsert key: re-saving the same name updates
+    the definition and re-attaches the schedule from `regular_cron`.
 
-    `frequency` picks a preset cron: daily (08:00), weekly (Mon 08:00),
-    monthly (1st 08:00), quarterly (Jan/Apr/Jul/Oct 1st 08:00). For anything else
-    set frequency="custom" and supply ONE of:
-      - `regular_cron`  -> a raw 5-field cron expression ("30 6 * * 1-5"). Preferred
-                           when you already know the exact cron — used verbatim.
-      - `custom_cron`   -> a natural-language schedule ("every weekday at 6:30am"),
-                           which the backend converts to cron via an LLM.
-    Both are ignored unless frequency="custom"; if you pass both, `regular_cron`
-    wins. Exactly one is required when frequency="custom".
+    `steps` is an ordered list of 1-8 dicts of two kinds:
 
-    `task_type` selects WHAT gets delivered and the shape of `instructions`:
+    - fetch     -> {"kind": "fetch", "endpoint": "...", "params": {...},
+                    "label": "..."}: call an allowlisted backend endpoint
+                    (kebab-case path, no leading slash).
+    - transform -> {"kind": "transform", "instruction": "...", "label": "..."}:
+                    apply a natural-language instruction (<=2000 chars) to the
+                    accumulated results of ALL prior steps (e.g. "intersect the
+                    two event sets by symbol and build a table").
 
-    - "report"   -> recurring company report. instructions REQUIRES `ticker`; optional
-                    override keys customize it — line items, ratios, filing frequency,
-                    institutional-ownership cuts (discover valid values with
-                    `list_options`), e.g.
-                    {"ticker": "AAPL", "include_transcript": false, "ratios": [...]}.
-    - "screener" -> recurring stock screen. instructions takes the same keys as
-                    `screen_stocks`: metrics, sectors, sub_sectors, market_cap,
-                    analyst_ratings, institutional_ownership, countries,
-                    price_performance (e.g. {"sectors": ["Technology"],
-                    "market_cap": ["Large-cap"]}).
-    - "research" -> recurring open-ended/thematic research. instructions REQUIRES
-                    `query`; optional `delivery` ("dashboard" or "email")
-                    (e.g. {"query": "high-growth semis with rising estimates",
-                    "delivery": "email"}).
-    - "events"   -> recurring earnings/market events. instructions takes the same
-                    keys as `list_realtime_events`: event_type (default
-                    "eps_update"), tickers, sector, industry, market_cap
-                    (e.g. {"event_type": "eps_update", "tickers": ["AAPL","MSFT"]}).
+    The FIRST step must be a fetch. `label` is optional (unique lowercase slug;
+    defaults to step_{i}) and keys that step's result. The LAST step's output is
+    what gets delivered, so end table/summary workflows with a transform.
 
-    Discover valid values with the list tools (`list_options`,
-    `list_sub_industries`) rather than guessing; invalid enum values are rejected
-    server-side. `bulk_subscribe=True` subscribes a wider audience instead of just
-    the caller — leave it False unless the user explicitly asks.
+    Allowlisted fetch endpoints (anything else is rejected with a 422 at save
+    time; `params` takes the same keys as the matching tool):
 
-    Returns 201 on success.
+    - POST, JSON-body params: "get-realtime-events" (`list_realtime_events`),
+      "list-upcoming-earnings-announcements" (`list_earnings_announcements`),
+      "predict-earnings-announcement-move" ({"symbols": [...]}),
+      "data-catalogue-exploration" ({"query": "..."}).
+    - GET, scalar query params only (no lists/dicts): "get-company-snapshot"
+      (requires {"symbol": "..."}), "get-strategy-performance-summary",
+      "get-strategy-track-record", "get-strategy-swaps", "get-stock-picks",
+      "list-tickers", "list-realtime-event-options", "get-sectors",
+      "get-sub-industries".
+    - EXPENSIVE — max 2 per workflow, and the cron must use a literal minute and
+      at most 4 literal hours (no sub-hourly / "*" fields): "screen-stocks"
+      (`screen_stocks`), "generate-research-report" ({"query": "..."}),
+      "create-full-report" ({"ticker": "..."} + report overrides),
+      "optimize-symbols", "optimize-portfolio", "list-optimized-stock-picks".
+
+    `delivery` is "email" (default) or "dashboard".
+
+    `regular_cron` is a raw 5-field cron expression controlling when the
+    workflow fires (e.g. "30 6 * * 1-5" = weekdays 06:30), validated
+    server-side. Each user may hold at most 10 active schedules.
+
+    Returns 201 (created) or 200 (updated) with `workflow_id` and `task_name`
+    ("wf:{email}:{name}"), the key that `list_scheduled_tasks` shows and
+    `delete_scheduled_task` takes.
     """
-    if frequency == "custom" and not (regular_cron or custom_cron):
-        return {"error": "When frequency='custom', supply regular_cron (a 5-field "
-                         "cron expression) or custom_cron (a natural-language schedule)."}
 
-    # Pin each task_type to its distinguishing field so the backend's
-    # Union[Report, StockScreener, SearchQuery, EarningEvents] resolution can't
-    # drift to the wrong branch on a thin payload.
-    instr = dict(instructions or {})
-    if task_type == "events":
-        instr.setdefault("event_type", "eps_update")
-    elif task_type == "screener":
-        instr.setdefault("metrics", {})
+    workflow: dict[str, Any] = {
+        "name": name,
+        "steps": steps,
+        "delivery": delivery,
+    }
+    if description:
+        workflow["description"] = description
 
     body: dict[str, Any] = {
-        "frequency": frequency,
-        "instructions": instr,
-        "task_name": task_name,
-        "bulk_subscribe": bulk_subscribe,
+        "workflow": workflow,
+        "schedule": {"regular_cron": regular_cron},
     }
-    if regular_cron:
-        body["regular_cron"] = regular_cron
-    if custom_cron:
-        body["custom_cron"] = custom_cron
+
     return await _send(
-        ctx, "POST", "/schedule-task", json=body
+        ctx, "POST", "/save-user-workflow", json=body
     )
 
 
@@ -1075,10 +1069,9 @@ async def list_scheduled_tasks(
 
     Returns only the authenticated user's jobs, each as
     {"name", "active", "schedule" (cron string), "args", "kwargs", "enabled",
-     "last_run_at", "total_run_count"}. Use `name` as the key to remove a job with
+     "last_run_at", "total_run_count"}. Workflow schedules are named
+    "wf:{email}:{workflow-name}". Use `name` as the key to remove a job with
     `delete_scheduled_task`.
-
-
     """
     return await _send(ctx, "GET", "/get-scheduled-tasks")
 
@@ -1090,11 +1083,12 @@ async def delete_scheduled_task(
 ) -> Any:
     """Delete a scheduled task (cron job) by its name.
 
-    `task_name` is the `name` returned by `list_scheduled_tasks` (the same
-    `task_name` used when the job was created via `schedule_task`). Returns
+    `task_name` is the `name` returned by `list_scheduled_tasks` — for workflow
+    schedules that is the "wf:{email}:{workflow-name}" value `schedule_task`
+    returns as `task_name`, NOT the bare workflow name. Deleting removes only
+    the cron schedule; the saved workflow definition is kept and can be
+    re-scheduled by re-saving it via `schedule_task`. Returns
     {"msg": "<task_name> deleted"} on success, or an error if no such task exists.
-
-
     """
     return await _send(
         ctx, "DELETE", "/delete-scheduled-task",
