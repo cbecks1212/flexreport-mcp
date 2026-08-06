@@ -1,4 +1,5 @@
-mcp>=1.27.0
+# <2 required: mcp 2.0.0 removed the mcp.server.fastmcp import path server.py uses
+mcp>=1.27.0,<2
 httpx>=0.27.0
 # OAuth Resource-Server token validation (RS256 via the backend JWKS). The [crypto]
 # extra pulls in `cryptography` for RSA signature verification.
