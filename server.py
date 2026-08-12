@@ -291,16 +291,12 @@ async def explore_data_catalogue(
     small caps doing — explore the data", "how have semiconductor margins trended?").
     It validates the request, plans queries against the data catalogue, runs them, and
     returns the raw result sets to render as INTERACTIVE CHARTS AND TABLES on the
-    dashboard. For pure coverage/enumeration questions ("which symbols / sectors /
-    indicators are available?", "is X covered?") prefer `list_options` instead — it
-    answers instantly from the live catalogs, no async job needed. But coverage
-    COUNTS and BREAKDOWNS belong HERE, not in `list_options` ("how many symbols are
-    covered in the investor relations dataset?", "what's the count by sector?", "how
-    many companies have earnings transcripts?"): `list_options` only enumerates the
-    overall universe — it cannot say which symbols carry a particular dataset, nor
-    group coverage by sector, industry, market cap, or date. Ask this tool in plain
-    English ("count the distinct symbols in the investor relations dataset, broken
-    out by sector") rather than answering a coverage count from memory.
+    dashboard. Coverage questions are NOT this tool: for an enumeration ("which
+    symbols / sectors / indicators are available?", "is X covered?") use
+    `list_options` — instant, no async job; for a coverage COUNT or breakdown ("how
+    many symbols are in the investor relations dataset?", "what's the count by
+    sector?") use `explore_data_coverage`, the dedicated public tool. Reach for THIS
+    tool when the user wants the DATA itself — values, history, trends, comparisons.
 
     *** RUN THIS BY ITSELF FIRST. DO NOT ALSO LAUNCH `generate_research_report` FOR THE
     SAME QUESTION. *** These two tools are SEQUENTIAL STEPS, never parallel:
@@ -338,9 +334,69 @@ async def explore_data_catalogue(
     )
 
 
+@mcp.tool(annotations=ToolAnnotations(title="Explore Data Coverage", readOnlyHint=False, destructiveHint=False))
+async def explore_data_coverage(
+    ctx: Context,
+    query: str,
+) -> Any:
+    """Answer a question about WHAT THE PLATFORM COVERS — how many symbols a dataset holds, broken down any way you like.
+
+    ===> THE TOOL for coverage COUNTS and BREAKDOWNS: "how many symbols are covered in
+    the investor relations dataset?", "what's that count by sector — how many tech
+    names?", "how many companies have earnings transcripts / 13F ownership / insider
+    activity / analyst estimates?", "how far back does the fundamentals history go?",
+    "what's your UK coverage by sector?". It plans queries over BOTH the catalogue's
+    own metadata and the datasets themselves, so it can count what no enumeration
+    endpoint knows: which symbols actually carry a PARTICULAR dataset, grouped by
+    sector, industry, country, market cap, or year.
+
+    PUBLIC at the backend — no account, plan, or entitlement is needed to answer a
+    coverage question, by design: a prospect evaluating the platform should be able to
+    ask what it covers. (The MCP connection itself still carries the client's OAuth
+    session — that gate is transport-wide, not this tool's.) Never treat a coverage
+    question as plan-gated or quota-gated, and never tell the user it needs an upgrade.
+
+    Pick between the three coverage-adjacent routes by what the answer looks like:
+      - a LIST of what exists ("which sectors / indicators are available?", "is X
+        covered?") -> `list_options`. Instant, no async job.
+      - a COUNT or breakdown of coverage -> THIS tool.
+      - the DATA itself (values, history, trends, comparisons) ->
+        `explore_data_catalogue`.
+    Do NOT answer a coverage count from memory, from the "2,900+ companies / ~420
+    indices" headline figures, or by eyeballing the length of a `list_options`
+    payload — those are universe-wide totals and say nothing about per-dataset
+    coverage. Run this tool.
+
+    There is no `delivery` argument: results always go to the dashboard so the user can
+    interact with them. Rate-limited to 20/hour server-side.
+
+    `query` is natural language — pass the coverage question as asked ("count the
+    distinct symbols in the investor relations dataset, broken out by sector").
+
+    Asynchronous: returns {"task_id": "...", "status": "PENDING"}. Poll a SINGLE task
+    with `get_task_status` until SUCCESS (the result is a plain dict — there is NO
+    nested task to chase). Expect roughly 1-5 minutes depending on the tables queried —
+    a task still PENDING after a couple of minutes is normal, so keep polling. On
+    SUCCESS, `result` is:
+      {"user_query": "...", "delivery": "dashboard",
+       "results": {"<query name>": {"description": "...", "columns": [...],
+                                     "rows": [...the FULL result set...],
+                                     "row_count": N}, ...}}
+    `rows` is NOT sampled or truncated — every bucket of a breakdown comes back
+    (`row_count` matches len(rows)), so the totals you report are the real ones.
+    Render each entry as a chart/table for the user. If the request can't be served
+    from the platform's data, `result` instead carries a `validation_status` of
+    "REJECTED" (with a reason) — relay that rather than retrying blindly.
+    """
+    return await _send(
+        ctx, "POST", "/data-coverage-exploration",
+        json={"query": query}, require_auth=False,
+    )
+
+
 @mcp.tool(annotations=ToolAnnotations(title="Get Async Task Status", readOnlyHint=True))
 async def get_task_status(ctx: Context, task_id: str) -> Any:
-    """Poll the status of an async job (generate_research_report, explore_data_catalogue, screen_stocks, ...).
+    """Poll the status of an async job (generate_research_report, explore_data_catalogue, explore_data_coverage, screen_stocks, ...).
 
     Returns {"task_id": ..., "status": ..., "result": ...}. `status` is one of
     PENDING, SUCCESS, FAILURE, RETRY. `result` is populated once status is SUCCESS.
