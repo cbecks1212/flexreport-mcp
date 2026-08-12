@@ -293,7 +293,14 @@ async def explore_data_catalogue(
     returns the raw result sets to render as INTERACTIVE CHARTS AND TABLES on the
     dashboard. For pure coverage/enumeration questions ("which symbols / sectors /
     indicators are available?", "is X covered?") prefer `list_options` instead — it
-    answers instantly from the live catalogs, no async job needed.
+    answers instantly from the live catalogs, no async job needed. But coverage
+    COUNTS and BREAKDOWNS belong HERE, not in `list_options` ("how many symbols are
+    covered in the investor relations dataset?", "what's the count by sector?", "how
+    many companies have earnings transcripts?"): `list_options` only enumerates the
+    overall universe — it cannot say which symbols carry a particular dataset, nor
+    group coverage by sector, industry, market cap, or date. Ask this tool in plain
+    English ("count the distinct symbols in the investor relations dataset, broken
+    out by sector") rather than answering a coverage count from memory.
 
     *** RUN THIS BY ITSELF FIRST. DO NOT ALSO LAUNCH `generate_research_report` FOR THE
     SAME QUESTION. *** These two tools are SEQUENTIAL STEPS, never parallel:
