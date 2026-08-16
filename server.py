@@ -644,10 +644,138 @@ async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
     do not infer coverage gaps from this tool. Route "which symbols / values are
     available" enumerations to `list_options` (instant), and "do you have data
     on <topic>" questions that need actual data to `explore_data_catalogue`.
+
+    *** RUN IT WITH `get_company_event_web(symbol)` — THE STANDARD PAIR. *** This
+    tool gives the WHAT (where the company stands); the event web gives the WHY
+    (the events that got it there, in order, and how they connect). The snapshot
+    states that the thesis shifted, the valuation signal changed, or ownership
+    moved; it does NOT say what caused any of it — every block here is a settled
+    output with the episode behind it stripped out. So whenever the user asks
+    about a company generally, or follows a snapshot with "why?" / "what changed?"
+    / "what drove that?", call BOTH and read them together: quote the snapshot for
+    the current position, and the event web for the sequence that explains it.
+    Presenting a snapshot alone as the whole picture is the failure mode — it
+    reads as a verdict with no evidence.
+
+    Two honest limits when pairing them. (1) The event web defaults to a 7-day
+    window; a driver older than that needs `window_days` widened (up to 90) before
+    you can say the snapshot is unexplained. (2) The blocks here carry their own
+    as-of dates — a 13F ownership block can be a quarter old, so the event that
+    explains it may sit well outside any window. Absence of a matching event is
+    NOT proof the snapshot moved for no reason.
     """
     return await _send(
         ctx, "GET", "/get-company-snapshot",
         params={"symbol": symbol}, require_auth=False,
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Get Company Event Web", readOnlyHint=True))
+async def get_company_event_web(
+    ctx: Context,
+    symbol: str,
+    window_days: Optional[int] = None,
+    max_nodes: Optional[int] = None,
+) -> Any:
+    """Fetch the connected WEB of what recently HAPPENED to a company — the WHY behind its snapshot, and a time-ordered graph to CHAIN your next calls off.
+
+    ===> A FIRST-LINE TOOL FOR SINGLE-COMPANY QUESTIONS, not a specialist one. Reach
+    for it whenever the user asks what has been going on with a name ("catch me up on
+    WM", "what happened at NVDA this week", "anything I should know before
+    earnings?"), asks WHY the company looks the way it does ("why is the thesis
+    negative?", "what drove the downgrade?", "what changed?"), or whenever you are
+    about to aim a targeted `explore_data_catalogue`, `generate_report_for_stock`, or
+    `list_realtime_events` request at ONE symbol. Synchronous, cheap, and public —
+    one call turns "I'll guess which event types and dates matter" into "here are
+    the exact events, their timestamps, the tables that were written, and the call
+    that returns each full payload".
+
+    *** THE STANDARD PAIR: `get_company_snapshot` + THIS. *** They answer the two
+    halves of almost every company question and are usually called TOGETHER:
+      - `get_company_snapshot(symbol)` -> the WHAT. Where the company stands now:
+        thesis, fundamentals, technicals, ownership, grades. A settled position with
+        no account of how it got there.
+      - `get_company_event_web(symbol)` -> the WHY. The episode behind that position:
+        the earnings print, the 8-K, the transcript update, the rating action, the
+        13F refresh — in order, with edges saying how each relates.
+    Read them together: the snapshot for the current position, the web for the
+    sequence that explains it. A snapshot delivered alone reads as a verdict with no
+    evidence; this tool is the evidence. Conversely, do NOT use this tool to state
+    the company's current position — it carries headlines and pointers, not values.
+    When the two disagree, say so plainly rather than smoothing it over: the blocks
+    in a snapshot carry independent as-of dates, so an ownership or grade block can
+    predate anything in the window (widen `window_days` before concluding a snapshot
+    move is unexplained).
+
+    Returns:
+      {"symbol": ..., "as_of": ISO8601, "window_days": N,
+       "nodes": [...], "edges": [...], "market_context": [...]}
+
+    NODES — two kinds, newest first, each with a short id ("n1", "n2", ...):
+      - kind="event"       — a published realtime event. Carries `type` (the event
+                             type, e.g. "8k_release"), `family`, and a `fetch` hint
+                             — the exact call that returns its FULL payload, e.g.
+                             {"tool": "list_realtime_events", "event_type": "8k_release",
+                              "related_endpoints": [...]}.
+      - kind="data_update" — a write to a backing table for activity that publishes
+                             NO event at all (insider filings, 13F refreshes, IPO
+                             calendar entries, Companies House events, transcript and
+                             fundamentals analysis). Carries `relation` (the table
+                             written) and NO `fetch` hint.
+    Every node carries `at` (when the write/publish happened) and `headline` (ONE
+    line, truncated at 200 chars).
+
+    EDGES — {"from": "n3", "to": "n1", "via": <relation>, "cause": ...}, pointing
+    from the EARLIER node to the LATER one. `cause` is a confidence grade — respect it:
+      - "same_chain_run" — OBSERVED. One backend chain run produced both nodes.
+      - "lineage"        — DECLARED. One wrote the table the other's event derives from.
+      - "co_occurrence"  — TEMPORAL ONLY. Same company, same window, no known causal
+                           path. Report these as "happened alongside", NEVER as caused-by.
+
+    HOW TO CHAIN (the point of this tool):
+      1. Walk the edges back from the newest node to reconstruct the episode, then
+         follow each event node's `fetch` to get the detail — e.g.
+         `list_realtime_events(event_type="8k_release", tickers=["WM"])`. Always narrow
+         by `tickers=[symbol]`; an unfiltered call re-pulls the entire cache.
+      2. A `data_update` node has no fetch hint, so use its `relation` and `at` to
+         write a PRECISE `explore_data_catalogue` query ("insider filings for WM since
+         2026-08-09", "13F position changes for WM in the last week") instead of a
+         vague one.
+      3. Feed the concrete events and dates into `generate_report_for_stock` /
+         `generate_research_report` so the report is scoped to what actually happened.
+      4. Nothing here is a full payload — a headline is a pointer, never the content.
+         Do not quote a headline as if it were the event.
+
+    `window_days` (default 7, max 90) and `max_nodes` (default 40, max 200) widen the
+    look-back. Beyond the node cap, edges are capped per node (~3 same_chain_run, ~3
+    co_occurrence) and `market_context` — market-wide macro/economic-calendar nodes
+    that carry no ticker and so attach to no symbol — is capped at 5. A MISSING edge
+    is therefore not evidence that two things are unrelated.
+
+    Traps:
+      - `at` is a WRITE/PUBLISH time, not a business date. An earnings call date or
+        fiscal period end can be well before the node's timestamp — never report `at`
+        as the date the underlying event occurred.
+      - A "<table> refreshed for N symbols" node is universe-wide scheduled
+        maintenance rolled up, not company-specific signal.
+      - An empty web (`"degraded": true`, empty lists) means the graph has no rows for
+        that symbol in the window — NOT that nothing happened and NOT that the symbol
+        is uncovered. Say so, and fall back to `list_realtime_events` /
+        `explore_data_catalogue` rather than concluding it was a quiet week.
+
+    PUBLIC at the backend — no account, plan, or entitlement is needed, the same
+    posture as `get_company_snapshot`. (The MCP connection itself still carries the
+    client's OAuth session; that gate is transport-wide, not this tool's.)
+    Rate-limited 60/min.
+    """
+    params: dict[str, Any] = {"symbol": symbol}
+    if window_days:
+        params["window_days"] = window_days
+    if max_nodes:
+        params["max_nodes"] = max_nodes
+    return await _send(
+        ctx, "GET", "/get-company-event-web",
+        params=params, require_auth=False,
     )
 
 
