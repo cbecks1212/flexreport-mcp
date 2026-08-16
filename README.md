@@ -44,10 +44,13 @@ make it available in every directory. See [Auth](#auth) for details.
 | `list_options(kind)` | `GET /list-realtime-event-options`, `/list-financial-items`, `/list-financial-ratios`, `/get-sectors`, `/list-institutional-investor-types`, `/list-countries`, `/get-fiscal-quarter`, `/list-marketcap-options`, `/list-intraday-chart-options`, `/list-pdf-tag-options`, `/list-technical-indicators`, `/list-tickers`, `/list-symbols-with-names` | One catalogue tool: enumerate valid values for a parameter (event types, ratios, sectors, investor types, countries, fiscal quarter, market-cap buckets, intraday frequencies, the PDF tag DSL, technical indicators, and the ticker universe with or without company names) |
 | `list_sub_industries(sectors)` | `GET /get-sub-industries` | Distinct industries within the given sector(s) |
 | `get_company_snapshot(symbol)` | `GET /get-company-snapshot` | Structured snapshot: thesis, fundamentals, technicals, price targets, ownership, grades |
+| `get_company_event_web(symbol, window_days, max_nodes)` | `GET /get-company-event-web` | The **why** behind the snapshot — the company's recent event **graph**: time-ordered event/`data_update` nodes with `fetch` hints and typed edges (`same_chain_run` / `lineage` / `co_occurrence`). Pair it with `get_company_snapshot`, and call it **before** chaining a targeted `list_realtime_events` / `explore_data_catalogue` / report request at one symbol |
 | `detect_intraday_outlier_jumps(symbol, zscore_threshold)` | `GET /detect-intraday-outlier-jumps` | Live look at today's 1-min tape; flags minutes whose move is a daily-sigma outlier (synchronous, authed) |
 | `get_aftermarket_trades(symbols, start_datetime, end_datetime)` | `POST /get-aftermarket-trades` | Query **stored** extended-hours trade ticks for symbols over an ET datetime range (defaults to today, authed, 300/min) |
 | `get_aftermarket_quotes(symbols, start_datetime, end_datetime)` | `POST /get-aftermarket-quotes` | Query **stored** extended-hours bid/ask quote ticks for symbols over an ET datetime range (defaults to today, authed, 300/min) |
 | `onboard_symbol(symbol)` | `POST /onboard-symbol` | Request onboarding of an uncovered ticker (async, authed, 5/hour) |
+
+For a single named company, `get_company_snapshot` and `get_company_event_web` are the **standard pair** — the two halves of the same question, usually called together. The snapshot is the **what** (where the company stands now: thesis, fundamentals, technicals, ownership, grades); the event web is the **why** (the episode behind it: earnings print → 8-K → transcript update → IR publication → analyst reaction, with edges saying how each relates). A snapshot on its own is a verdict with no evidence; the web is the evidence. The web is also the cheap grounding call that makes the rest of the loop precise — each node carries the exact follow-up call, so the next `list_realtime_events`, `explore_data_catalogue`, or report request carries real event types and dates instead of guessed ones.
 
 Typical agent loop: default to `explore_data_catalogue(query)` for open-ended/exploratory questions (fast, interactive charts/tables). Escalate only on a crystal-clear intent — `get_latest_report(symbols)` for the existing report on a named ticker, `screen_stocks(...)` to filter the universe, or `generate_research_report(query)` for an explicit deep dive (~10-12 min, async — **poll** with `get_task_status`).
 
@@ -127,8 +130,9 @@ token minted elsewhere. Nothing is stored at rest; tokens are forwarded per-call
 ```bash
 npx @modelcontextprotocol/inspector
 # Connect to http://localhost:8000/mcp with header Authorization: Bearer <OAuth access token>
-# Confirm the tools list loads (32 tools), then exercise:
+# Confirm the tools list loads (34 tools), then exercise:
 #   list_realtime_events("eps_update")        -> events (or [])
+#   get_company_event_web("NVDA")             -> event graph (or an empty/degraded web)
 #   get_latest_report(["AAPL"])               -> presigned PDF url (or missing)  [named-ticker report]
 #   explore_data_catalogue("MU EPS growth last 8 quarters")  -> task_id  [default exploratory route]
 #   get_task_status(task_id)                  -> eventually SUCCESS
