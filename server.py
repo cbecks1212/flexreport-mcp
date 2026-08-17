@@ -157,7 +157,7 @@ async def _send(
 @mcp.tool(annotations=ToolAnnotations(title="List Real-Time Market Events", readOnlyHint=True))
 async def list_realtime_events(
     ctx: Context,
-    event_type: str = "eps_update",
+    event_type: str,
     tickers: Optional[list[str]] = None,
     sector: Optional[list[str]] = None,
     industry: Optional[list[str]] = None,
@@ -168,8 +168,10 @@ async def list_realtime_events(
     On ANY real-time/events request, call `list_options("event_types")` FIRST —
     it returns every event type with its family, description, and the
     related_events that fire around the same situation. Work from that
-    catalogue, never a remembered list of types. `event_type` defaults to
-    "eps_update", which is only one slice of the earnings family.
+    catalogue, never a remembered list of types. `event_type` is REQUIRED and
+    has no default on purpose: the type is the whole question, and a default
+    would answer a different one (eps_update is one slice of the earnings
+    family, not the family).
 
     Then CONNECT THE DOTS: fetch the type asked about and follow the situation
     across its related_events with follow-up calls narrowed by `tickers=[...]`
