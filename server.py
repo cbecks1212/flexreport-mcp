@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Literal, Optional, get_args
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
@@ -723,7 +724,10 @@ async def get_company_event_web(
                              NO event at all (insider filings, 13F refreshes, IPO
                              calendar entries, Companies House events, transcript and
                              fundamentals analysis). Carries `relation` (the table
-                             written) and NO `fetch` hint.
+                             written); most also carry a `fetch` hint (a ready-made
+                             `explore_data_catalogue` query for the underlying rows),
+                             and on some relations the hint additionally carries
+                             `signed_query_url` — see step 2 below.
     Every node carries `at` (when the write/publish happened) and `headline` (ONE
     line, truncated at 200 chars).
 
@@ -739,10 +743,13 @@ async def get_company_event_web(
          follow each event node's `fetch` to get the detail — e.g.
          `list_realtime_events(event_type="8k_release", tickers=["WM"])`. Always narrow
          by `tickers=[symbol]`; an unfiltered call re-pulls the entire cache.
-      2. A `data_update` node has no fetch hint, so use its `relation` and `at` to
-         write a PRECISE `explore_data_catalogue` query ("insider filings for WM since
-         2026-08-09", "13F position changes for WM in the last week") instead of a
-         vague one.
+      2. When a `data_update` node's `fetch` carries `signed_query_url`, call
+         `get_signed_sql_drilldown` with it FIRST — zero planning, and it returns the
+         new record (`is_new_record: true`) plus the context rows to read it against.
+         Otherwise use the node's `fetch` query if it has one, or its `relation` and
+         `at` to write a PRECISE `explore_data_catalogue` query ("insider filings for
+         WM since 2026-08-09", "13F position changes for WM in the last week")
+         instead of a vague one.
       3. Feed the concrete events and dates into `generate_report_for_stock` /
          `generate_research_report` so the report is scoped to what actually happened.
       4. Nothing here is a full payload — a headline is a pointer, never the content.
@@ -778,6 +785,38 @@ async def get_company_event_web(
     return await _send(
         ctx, "GET", "/get-company-event-web",
         params=params, require_auth=False,
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Run Signed Drilldown Query", readOnlyHint=True))
+async def get_signed_sql_drilldown(ctx: Context, encrypted_query_token: str) -> Any:
+    """Fetch the rows behind an event-web drilldown from its server-minted query token.
+
+    Some `get_company_event_web` nodes carry `signed_query_url` in their `fetch` hint —
+    an opaque, tamper-proof link the backend minted for exactly that node. This tool is
+    the zero-planning rung of the chain: no query to compose, the rows come back
+    directly. Pass either the full `signed_query_url` or just its `t` parameter; the
+    URL form is unwrapped automatically. Tokens are minted server-side only — NEVER
+    construct, guess, or modify one, and never pass SQL here.
+
+    Returns {"format": "table", "count": N, "rows": [...]} — rows only, never the
+    underlying SQL. For contextual drilldowns the NEW record is flagged
+    `is_new_record: true` and the remaining rows are the prior/context records to read
+    it against (the node's `signed_query_context` describes what they are).
+
+    HTTP 403 means the token is invalid or tampered — do not retry with an altered
+    token; re-fetch the event web for a fresh link instead.
+
+    PUBLIC at the backend — no account, plan, or entitlement is needed, the same
+    posture as `get_company_event_web`.
+    """
+    token = encrypted_query_token.strip()
+    # A full signed_query_url may be passed instead of the bare token; Fernet tokens
+    # never contain "?", so a query string reliably marks the URL form.
+    if "?" in token:
+        token = parse_qs(urlsplit(token).query).get("t", [token])[0]
+    return await _send(
+        ctx, "GET", "/query-data", params={"t": token}, require_auth=False,
     )
 
 
