@@ -746,6 +746,9 @@ async def get_company_event_web(
       2. When a `data_update` node's `fetch` carries `signed_query_url`, call
          `get_signed_sql_drilldown` with it FIRST — zero planning, and it returns the
          new record (`is_new_record: true`) plus the context rows to read it against.
+         That follow-up needs the user SIGNED IN (this tool does not); if it comes back
+         not-authenticated, the link is fine — say sign-in is needed for the rows and
+         fall back to an `explore_data_catalogue` query on the node's `relation`.
          Otherwise use the node's `fetch` query if it has one, or its `relation` and
          `at` to write a PRECISE `explore_data_catalogue` query ("insider filings for
          WM since 2026-08-09", "13F position changes for WM in the last week")
@@ -807,17 +810,17 @@ async def get_signed_sql_drilldown(ctx: Context, encrypted_query_token: str) -> 
     HTTP 403 means the token is invalid or tampered — do not retry with an altered
     token; re-fetch the event web for a fresh link instead.
 
-    PUBLIC at the backend — no account, plan, or entitlement is needed, the same
-    posture as `get_company_event_web`.
+    Requires auth (your MCP client attaches the OAuth bearer automatically) — unlike
+    `get_company_event_web`, which is public: the web hands out the LINK to anyone, but
+    following it to the underlying rows is for signed-in users. A signed-out caller gets
+    a not-authenticated error, not rows; the fix is signing in, never a different token.
     """
     token = encrypted_query_token.strip()
     # A full signed_query_url may be passed instead of the bare token; Fernet tokens
     # never contain "?", so a query string reliably marks the URL form.
     if "?" in token:
         token = parse_qs(urlsplit(token).query).get("t", [token])[0]
-    return await _send(
-        ctx, "GET", "/query-data", params={"t": token}, require_auth=False,
-    )
+    return await _send(ctx, "GET", "/query-data", params={"t": token})
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Technical Indicator Data", readOnlyHint=True))
