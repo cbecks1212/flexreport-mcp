@@ -327,6 +327,16 @@ async def explore_data_catalogue(
                                      "row_count": N}, ...}}
     `rows` is NOT sampled — it carries every row (`row_count` matches len(rows)), so
     charts/tables reflect the whole population.
+
+    Each entry ALSO carries `query_token`: the planned SQL sealed into an opaque token.
+    It is not readable and never for display — its one use is `save_user_query`, which
+    stores the tokens so `run_saved_query` can replay THIS EXACT request later in
+    seconds instead of re-planning it. Offer that when the user signals they will want
+    the question again (a recurring check, a dashboard they watch); a saved row also
+    spares the 20/hour budget. And before running this tool for something the user has
+    asked before, check `list_saved_queries` — the answer may already be one fast
+    replay away.
+
     Render each entry as a chart/table for the user. If the request can't be served from
     the platform's data, `result` instead carries a `validation_status` of "REJECTED"
     (with a reason) — relay that rather than retrying blindly.
@@ -791,6 +801,19 @@ async def get_company_event_web(
     )
 
 
+def _query_token(reference: str) -> str:
+    """Normalise a server-minted query reference to its bare `t` token.
+
+    Accepts either the bare token or a full signed URL (`signed_query_url`,
+    `source_url`). Fernet tokens never contain "?", so a query string reliably
+    marks the URL form.
+    """
+    token = reference.strip()
+    if "?" in token:
+        token = parse_qs(urlsplit(token).query).get("t", [token])[0]
+    return token
+
+
 @mcp.tool(annotations=ToolAnnotations(title="Run Signed Drilldown Query", readOnlyHint=True))
 async def get_signed_sql_drilldown(ctx: Context, encrypted_query_token: str) -> Any:
     """Fetch the rows behind an event-web drilldown from its server-minted query token.
@@ -800,7 +823,9 @@ async def get_signed_sql_drilldown(ctx: Context, encrypted_query_token: str) -> 
     the zero-planning rung of the chain: no query to compose, the rows come back
     directly. Pass either the full `signed_query_url` or just its `t` parameter; the
     URL form is unwrapped automatically. Tokens are minted server-side only — NEVER
-    construct, guess, or modify one, and never pass SQL here.
+    construct, guess, or modify one, and never pass SQL here. A token that came from a
+    SAVED request rather than the event web belongs to `run_saved_query` instead — same
+    endpoint, but it replays every query in the saved row in one call.
 
     Returns {"format": "table", "count": N, "rows": [...]} — rows only, never the
     underlying SQL. For contextual drilldowns the NEW record is flagged
@@ -815,12 +840,176 @@ async def get_signed_sql_drilldown(ctx: Context, encrypted_query_token: str) -> 
     following it to the underlying rows is for signed-in users. A signed-out caller gets
     a not-authenticated error, not rows; the fix is signing in, never a different token.
     """
-    token = encrypted_query_token.strip()
-    # A full signed_query_url may be passed instead of the bare token; Fernet tokens
-    # never contain "?", so a query string reliably marks the URL form.
-    if "?" in token:
-        token = parse_qs(urlsplit(token).query).get("t", [token])[0]
-    return await _send(ctx, "GET", "/query-data", params={"t": token})
+    return await _send(
+        ctx, "GET", "/query-data",
+        params={"t": _query_token(encrypted_query_token)},
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Save Data Request For Replay", readOnlyHint=False, destructiveHint=False))
+async def save_user_query(
+    ctx: Context,
+    user_request: str,
+    query_tokens: list[str],
+) -> Any:
+    """Save the queries an exploration already planned, so the same request can be replayed instantly.
+
+    THE POINT: `explore_data_catalogue` is a full validate -> plan -> run pipeline that
+    re-authors the SQL from scratch on every call (~1-5 min, 20/hour). For a question
+    the user will ask AGAIN — a recurring check, a dashboard they watch, "my usual
+    semis screen" — save the tokens that exploration just produced. `run_saved_query`
+    then re-runs exactly those queries against live data in seconds, with no planning
+    step and no async job to poll.
+
+    WHEN TO CALL: after an exploration the user says (or clearly implies) they will
+    want again. Do NOT save every exploration by reflex, and do not save a one-off.
+
+    `user_request` — the natural-language request being saved, in the user's own words.
+    It is the ONLY human-readable label on the saved row, so make it specific enough to
+    recognise later ("weekly EPS-revision check on my semis basket", not "the query").
+
+    `query_tokens` — the `query_token` values from the exploration result's `results`
+    entries, one per named query, passed through EXACTLY as returned. Each is opaque
+    ciphertext the server minted around the planned SQL; a full `signed_query_url` /
+    `source_url` is accepted too and unwrapped to its token. NEVER write, guess, or
+    edit a token, and never pass SQL here — a token this backend did not mint cannot be
+    decrypted and fails with 403 at replay time, long after the exploration is gone. A
+    result entry carrying no `query_token` has nothing to save; skip it.
+
+    Owner-scoped: the row belongs to the calling user and is invisible to everyone
+    else. There is NO upsert (unlike `schedule_task`): saving the same request twice
+    creates a SECOND row. Check `list_saved_queries` first and `delete_saved_query` the
+    stale one rather than piling up near-duplicates.
+
+    Returns {"msg": "Successfully saved query: <user_request>"}. The row `id` is not in
+    the response — `list_saved_queries` has it, and it is what `delete_saved_query`
+    takes.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    Rate-limited 100/min.
+    """
+    tokens = [_query_token(t) for t in query_tokens if t and t.strip()]
+    if not tokens:
+        return {"error": "query_tokens is required — pass the `query_token` values from the exploration result."}
+    return await _send(
+        ctx, "POST", "/save-user-query",
+        json={"user_request": user_request, "queries": tokens},
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(title="List Saved Data Requests", readOnlyHint=True))
+async def list_saved_queries(
+    ctx: Context,
+    limit: int = 50,
+) -> Any:
+    """List the data requests you have saved with `save_user_query`, newest first.
+
+    The entry point to the replay flow: check HERE before re-running
+    `explore_data_catalogue` for a question the user has asked before — a matching
+    saved row means the answer is seconds away via `run_saved_query` instead of a
+    ~1-5 minute planning job.
+
+    Returns {"count": N, "saved_queries": [{"id", "user_request", "queries",
+    "created_at", "updated_at"}, ...]}, the calling user's rows only:
+      - `user_request` is the natural-language label to match against what the user
+        just asked. Match on MEANING, not string equality — but a row that is merely
+        close is a DIFFERENT question; confirm with the user before replaying it.
+      - `queries` is the list of opaque query tokens — hand it straight to
+        `run_saved_query`. Never show a token to the user: it is ciphertext, not
+        content, and says nothing about what the query does.
+      - `id` is what `delete_saved_query` takes.
+
+    `limit` is 1-500 (default 50). Duplicate `user_request` values are possible —
+    saving does not upsert.
+
+    An HTTP 503 here means the backend's saved-queries table has not been created yet,
+    NOT that the user has nothing saved — report that difference rather than an empty
+    list.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    Rate-limited 100/min.
+    """
+    return await _send(ctx, "GET", "/get-saved-queries", params={"limit": limit})
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Run Saved Data Request", readOnlyHint=True))
+async def run_saved_query(
+    ctx: Context,
+    query_tokens: list[str],
+) -> Any:
+    """Re-run a saved request's queries immediately against live data — no planning, no polling.
+
+    The payoff of `save_user_query`: pass a saved row's `queries` array from
+    `list_saved_queries` and each stored query runs as-is, returning fresh rows
+    synchronously. Use this INSTEAD of `explore_data_catalogue` whenever a saved row
+    already covers the question — same SQL, current data, seconds instead of minutes,
+    and it does not draw on the 20/hour exploration budget.
+
+    `query_tokens` — the saved row's `queries` list, verbatim (a full signed URL is
+    accepted and unwrapped). Max 25 per call. Tokens are server-minted only: never
+    construct or edit one, and never pass SQL. For a token that came from a
+    `get_company_event_web` node rather than a saved row, use
+    `get_signed_sql_drilldown` — same endpoint, single node, drilldown framing.
+
+    Returns {"queries_run": N, "results": [{"index": i, "format": "table",
+    "count": <row count>, "rows": [...]}, ...]}, in the SAME ORDER as `query_tokens`.
+    Rows only — the underlying SQL is never returned, by design. Describe the results
+    from the saved `user_request` and the columns, never by asserting what the query
+    does internally.
+
+    Each token runs independently: one failure does not stop the rest, and that entry
+    carries an "error" key instead of rows. A 403 means that token is invalid or
+    tampered — do not retry it altered; the saved row is dead, so re-run
+    `explore_data_catalogue`, `save_user_query` a fresh row, and `delete_saved_query`
+    the old one.
+
+    A replay returning DIFFERENT rows than when it was saved is normal — it hits live
+    data. Report what comes back now; never reconcile it against remembered numbers.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    """
+    tokens = [_query_token(t) for t in query_tokens if t and t.strip()]
+    if not tokens:
+        return {"error": "query_tokens is required — pass the `queries` array from list_saved_queries."}
+    if len(tokens) > 25:
+        return {"error": f"Too many query tokens ({len(tokens)}); a saved request holds a handful. Max 25 per call."}
+
+    # Sequential, not fanned out: a saved request holds a few queries, each one is a
+    # metered backend call, and keeping the order means `results[i]` always lines up
+    # with `query_tokens[i]`. A failed token yields its error entry and the rest run.
+    results: list[dict[str, Any]] = []
+    for i, token in enumerate(tokens):
+        payload = await _send(ctx, "GET", "/query-data", params={"t": token})
+        results.append({"index": i, **(payload if isinstance(payload, dict) else {"result": payload})})
+    return {"queries_run": len(results), "results": results}
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Delete Saved Data Request", readOnlyHint=False, destructiveHint=True, idempotentHint=True))
+async def delete_saved_query(
+    ctx: Context,
+    query_id: int,
+) -> Any:
+    """Delete one of your saved data requests by id.
+
+    `query_id` is the `id` from `list_saved_queries` — NOT a position in that list and
+    not the `user_request`. Deletion is permanent and touches no data, but the query
+    tokens go with the row and cannot be reconstructed: re-creating it means running
+    `explore_data_catalogue` again and re-saving. When more than one row looks like a
+    match, confirm WHICH one with the user before calling.
+
+    Ownership is enforced server-side. A 404 ("No saved query with id N") means the id
+    does not exist OR is not yours — the backend deliberately does not distinguish the
+    two, so never tell the user the row belongs to someone else.
+
+    Returns {"msg": "Deleted saved query <id>"}.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    Rate-limited 100/min.
+    """
+    return await _send(
+        ctx, "DELETE", "/delete-saved-query",
+        params={"query_id": query_id},
+    )
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Technical Indicator Data", readOnlyHint=True))
