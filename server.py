@@ -323,10 +323,16 @@ async def explore_data_catalogue(
     `result` is:
       {"user_query": "...", "delivery": "dashboard",
        "results": {"<query name>": {"description": "...", "columns": [...],
-                                     "rows": [...the FULL result set...],
-                                     "row_count": N}, ...}}
-    `rows` is NOT sampled — it carries every row (`row_count` matches len(rows)), so
-    charts/tables reflect the whole population.
+                                     "rows": [...up to 2,000 rows per poll...],
+                                     "row_count": N, "rows_offset": 0,
+                                     "rows_returned": M, "rows_truncated": bool}, ...}}
+    `rows` is NOT sampled — the stored result holds every row and `row_count` is the
+    true total — but it is PAGED over the transport in windows of 2,000 rows. Under
+    2,000 rows (nearly every exploration) `rows_truncated` is false and `rows` is the
+    whole set. When it is true, re-poll `get_task_status` with the same task_id and
+    `offset` = rows_offset + rows_returned (optionally `max_rows`, up to 10,000) until
+    it is false, and concatenate the windows so charts/tables reflect the whole
+    population — never chart a truncated window as if it were the total.
 
     Each entry ALSO carries `query_token`: the planned SQL sealed into an opaque token.
     It is not readable and never for display — its one use is `save_user_query`, which
@@ -393,10 +399,15 @@ async def explore_data_coverage(
     SUCCESS, `result` is:
       {"user_query": "...", "delivery": "dashboard",
        "results": {"<query name>": {"description": "...", "columns": [...],
-                                     "rows": [...the FULL result set...],
-                                     "row_count": N}, ...}}
-    `rows` is NOT sampled or truncated — every bucket of a breakdown comes back
-    (`row_count` matches len(rows)), so the totals you report are the real ones.
+                                     "rows": [...up to 2,000 rows per poll...],
+                                     "row_count": N, "rows_offset": 0,
+                                     "rows_returned": M, "rows_truncated": bool}, ...}}
+    `rows` is NOT sampled — every bucket of a breakdown is stored and `row_count` is
+    the true total — but it is PAGED over the transport in windows of 2,000 rows. A
+    coverage breakdown is virtually always under that, so `rows_truncated` is false
+    and `rows` is the whole set. If it is ever true, re-poll `get_task_status` with
+    the same task_id and `offset` = rows_offset + rows_returned until it is false,
+    and concatenate the windows so the totals you report are the real ones.
     Render each entry as a chart/table for the user. If the request can't be served
     from the platform's data, `result` instead carries a `validation_status` of
     "REJECTED" (with a reason) — relay that rather than retrying blindly.
@@ -408,15 +419,38 @@ async def explore_data_coverage(
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Async Task Status", readOnlyHint=True))
-async def get_task_status(ctx: Context, task_id: str) -> Any:
+async def get_task_status(
+    ctx: Context,
+    task_id: str,
+    max_rows: Optional[int] = None,
+    offset: Optional[int] = None,
+) -> Any:
     """Poll the status of an async job (generate_research_report, explore_data_catalogue, explore_data_coverage, screen_stocks, ...).
 
     Returns {"task_id": ..., "status": ..., "result": ...}. `status` is one of
     PENDING, SUCCESS, FAILURE, RETRY. `result` is populated once status is SUCCESS.
+
+    PAGING — for result-set entries only. Inside a SUCCESS result, every entry shaped
+    {"columns": [...], "rows": [...], "row_count": N} (what `explore_data_catalogue`
+    and `explore_data_coverage` return) has its `rows` WINDOWED on the way out: by
+    default the first 2,000 rows. `row_count` is ALWAYS the true total; the window is
+    described by `rows_offset`, `rows_returned` and `rows_truncated`. Under 2,000
+    rows nothing changes — `rows_truncated` is false and `rows` is the whole set,
+    which is the case for nearly every exploration (wide 13F pulls are the exception).
+    When `rows_truncated` is true, call this tool again with the SAME task_id and
+    `offset` = rows_offset + rows_returned, and keep going until it is false; the
+    stored result never changes between polls. `max_rows` (1-10,000) widens the
+    window. Both apply to EVERY entry in the result at once. Other job types
+    (reports, screens, PDFs) carry no such entries and pass through untouched.
     """
+    params: dict[str, Any] = {"task_id": task_id}
+    if max_rows is not None:
+        params["max_rows"] = max_rows
+    if offset is not None:
+        params["offset"] = offset
     return await _send(
         ctx, "GET", "/task-status",
-        params={"task_id": task_id}, require_auth=False,
+        params=params, require_auth=False,
     )
 
 
