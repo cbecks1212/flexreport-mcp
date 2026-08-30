@@ -45,6 +45,8 @@ make it available in every directory. See [Auth](#auth) for details.
 | `list_sub_industries(sectors)` | `GET /get-sub-industries` | Distinct industries within the given sector(s) |
 | `get_company_snapshot(symbol)` | `GET /get-company-snapshot` | Structured snapshot: thesis, fundamentals, technicals, price targets, ownership, grades |
 | `get_company_event_web(symbol, window_days, max_nodes)` | `GET /get-company-event-web` | The **why** behind the snapshot — the company's recent event **graph**: time-ordered event/`data_update` nodes with `fetch` hints and typed edges (`same_chain_run` / `lineage` / `co_occurrence`). Pair it with `get_company_snapshot`, and call it **before** chaining a targeted `list_realtime_events` / `explore_data_catalogue` / report request at one symbol |
+| `situate(symbols, window_days, question)` | `GET /get-company-event-web` + `GET /get-event-ontology` + `GET /is-market-open` | **The first call.** Composes the event web (what happened to *this* company), the ontology (what that *kind* of event entails, what follows it, where its payload lives after the 12h cache, when each table next refreshes) and market status into what is going on right now plus an ordered **`plan`** of exact tool calls, a **`skip`** list of calls that would return nothing, and situation-scoped **`guidance`**. Composition is in `situate.py` (pure functions, fixture-tested); no new backend route. Public, synchronous |
+| `get_event_ontology(event_type, family, relation, format)` | `GET /get-event-ontology` | The class-level **ontology** behind the event web — what an event **type** entails: the tables written when it fires (by layer), the events that usually follow (observed rate / lag), where the payload lives after the 12h realtime cache (`persisted_in`), which workflow refreshes each relation and its `next_run_at` (the freshness check), and which tool reads it. Symbol-independent, public, cacheable — call it **first** on any event-driven request and join it to a web node's `type` / `relation` / `family` |
 | `get_signed_sql_drilldown(encrypted_query_token)` | `GET /query-data` | Follow a `get_company_event_web` node's `signed_query_url` (or its bare `t` token) to the rows behind it — new record flagged `is_new_record: true`, plus context rows; tokens are server-minted only, never constructed (authed) |
 | `save_user_query(user_request, query_tokens)` | `POST /save-user-query` | Save an `explore_data_catalogue` result's opaque `query_token`s under the user's own wording, so the request can be replayed without re-planning it (authed, owner-scoped; **no upsert** — saving twice creates two rows, 100/min) |
 | `list_saved_queries(limit)` | `GET /get-saved-queries` | The caller's saved requests, newest first — `id` (what delete takes), `user_request` (the label to match the user's ask against), `queries` (the tokens to replay). A 503 means the backend table isn't created yet, **not** "nothing saved" |
@@ -137,7 +139,7 @@ token minted elsewhere. Nothing is stored at rest; tokens are forwarded per-call
 ```bash
 npx @modelcontextprotocol/inspector
 # Connect to http://localhost:8000/mcp with header Authorization: Bearer <OAuth access token>
-# Confirm the tools list loads (34 tools), then exercise:
+# Confirm the tools list loads (41 tools), then exercise:
 #   list_realtime_events("eps_update")        -> events (or [])
 #   get_company_event_web("NVDA")             -> event graph (or an empty/degraded web)
 #   get_latest_report(["AAPL"])               -> presigned PDF url (or missing)  [named-ticker report]
