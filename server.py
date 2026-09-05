@@ -51,7 +51,7 @@ _auth_settings = AuthSettings(
 )
 # --- Discovery / metadata catalogues ---------------------------------------
 # One tool (`list_options`) enumerates valid parameter values (event types,
-# report override items, sectors, tickers, PDF tags, indicators, ...) instead
+# report override items, sectors, tickers, indicators, ...) instead
 # of a standalone tool per catalogue. All read-only and public.
 
 _OPTION_ENDPOINTS = {
@@ -64,7 +64,6 @@ _OPTION_ENDPOINTS = {
     "fiscal_quarter": "/get-fiscal-quarter",
     "market_cap": "/list-marketcap-options",
     "intraday_frequency": "/list-intraday-chart-options",
-    "pdf_options": "/list-pdf-tag-options",
     "technical_indicators": "/list-technical-indicators",
     "tickers": "/list-tickers",
     "tickers_with_names": "/list-symbols-with-names",
@@ -96,7 +95,6 @@ _OptionKind = Literal[
     "fiscal_quarter",
     "market_cap",
     "intraday_frequency",
-    "pdf_options",
     "technical_indicators",
     "tickers",
     "tickers_with_names",
@@ -798,15 +796,6 @@ async def list_options(
     - "market_cap"                   -> valid `market_cap` buckets (Small-cap,
                                         Medium-cap, Large-cap, Mega-cap)
     - "intraday_frequency"           -> supported intraday chart frequencies
-    - "pdf_options"                  -> the complete `document_structure` tag DSL for
-                                        `build_pdf_full_width` / `build_pdf_sidebar`:
-                                        every block tag, its payload shape with a worked
-                                        example, usage rules, and a full example document.
-                                        Call before your FIRST build — do not guess.
-                                        Signed in, it also carries a `user_template`
-                                        block when the user saved a PDF format
-                                        (`save_user_template`): fill it and post it
-                                        under document_structure["user_template_main"]
     - "technical_indicators"         -> indicator names accepted by
                                         `get_technical_indicator_data` (rsi, macd,
                                         sma_50, ...); an unknown indicator there
@@ -848,112 +837,26 @@ async def list_sub_industries(ctx: Context, sectors: list[str]) -> Any:
     )
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Build Full-Width PDF", readOnlyHint=False, destructiveHint=False))
-async def build_pdf_full_width(
-    ctx: Context,
-    document_structure: dict,
-    font: str = "Times-Roman",
-    font_size: int = 10,
-) -> Any:
-    """Render a tagged `document_structure` into a full-width PDF and return a link.
-
-    THE DEFAULT PDF BUILDER — reach for this first. `document_structure` must
-    follow the tag DSL from `list_options("pdf_options")` (call that first). The page is a
-    single letter-size column: no sidebar rail, `_sidebar`-tagged blocks flow
-    inline with everything else, and tag suffixes are optional (bare legacy tags
-    like paragraph/table/line_chart are accepted). Blocks render in key insertion
-    order and paginate normally. Best for memos, narratives, and any report whose
-    content reads as one flowing column.
-
-    Use `build_pdf_sidebar` INSTEAD only when the format genuinely benefits from a
-    fixed left rail of at-a-glance metadata (e.g. an equity research note with
-    rating, price target, and key stats beside the body). Decide from the user's
-    request and the desired format.
-
-    For charts, PREFER DATA OVER PIXELS: send raw series through the native chart
-    tags (line/bar, or a 'multi_panel' item under line_chart_two_main for stacked
-    price/RSI/MACD-style panels) and let the backend render them — a few KB of
-    JSON instead of a large base64 image. Only use a figure tag for an image you
-    already hold verbatim: hand-built base64 risks corruption in transit, and an
-    unreadable image degrades to blank space instead of failing the build.
-
-    USER TEMPLATE: if this user saved a PDF format (`save_user_template`),
-    `list_options("pdf_options")` returns a `user_template` block — fill its markup
-    with real data, keep the markup and classes exactly, and post it under
-    document_structure["user_template_main"]. The backend does the swap (an add_on
-    replaces the anchored section, a bespoke replaces the whole document) and the
-    response carries `template_applied: true`. Omit the key for the stock layout.
-
-    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10). Returns
-    {"s3_presigned_url": "<time-limited S3 link to the PDF>", "warnings": [...]}.
-    Hand the user the URL (it expires), or pass it to `download_pdf_from_url` to
-    pull the bytes inline on clients that can't open the link. CHECK `warnings`: a
-    non-empty list means one or more blocks (usually a figure/image) were dropped
-    or rendered degraded.
-
-    Requires auth (your MCP client attaches the OAuth bearer automatically).
-    """
-    return await _send(
-        ctx, "POST", "/create-pdf",
-        json={"document_structure": document_structure, "font": font, "font_size": font_size},
-    )
-
-
-@mcp.tool(annotations=ToolAnnotations(title="Build Sidebar PDF", readOnlyHint=False, destructiveHint=False))
-async def build_pdf_sidebar(
-    ctx: Context,
-    document_structure: dict,
-    font: str = "Times-Roman",
-    font_size: int = 10,
-) -> Any:
-    """Render a tagged `document_structure` into a sidebar-layout PDF and return a link.
-
-    Same tag DSL and engine as `build_pdf_full_width` (call `list_options("pdf_options")`
-    first) but the report adds a fixed grey left rail drawn on every page: put
-    `_sidebar`-tagged blocks in the rail (rating, price target, key stats — keep
-    it short; the rail does NOT paginate, so one page height of content max, or
-    the overflow is dropped) and `_main`-tagged blocks in the paginated main column.
-
-    Choose this over the default `build_pdf_full_width` only when the format
-    genuinely calls for an at-a-glance metadata rail — a classic equity research
-    note is the canonical case. For most documents (memos, narratives,
-    single-column reports), prefer `build_pdf_full_width`. Decide from the user's
-    request and the desired format.
-
-    For charts, PREFER DATA OVER PIXELS: send raw series through the native chart
-    tags (line/bar, or a 'multi_panel' item under line_chart_two_main) rather than
-    embedding hand-built base64 images via figure tags — large base64 risks
-    corruption in transit, and an unreadable image degrades to blank space.
-
-    USER TEMPLATE: if this user saved a PDF format (`save_user_template`),
-    `list_options("pdf_options")` returns a `user_template` block — fill its markup
-    with real data, keep the markup and classes exactly, and post it under
-    document_structure["user_template_main"]. The backend does the swap (an add_on
-    replaces the anchored section, a bespoke replaces the whole document) and the
-    response carries `template_applied: true`. Omit the key for the stock layout.
-
-    `font`/`font_size` set the base body style (e.g. "Times-Roman", 10). Returns
-    {"s3_presigned_url": "<time-limited S3 link to the PDF>", "warnings": [...]}.
-    Hand the user the URL (it expires), or pass it to `download_pdf_from_url` to
-    pull the bytes inline on clients that can't open the link. CHECK `warnings`: a
-    non-empty list means one or more blocks were dropped or rendered degraded.
-
-    Requires auth (your MCP client attaches the OAuth bearer automatically).
-    """
-    return await _send(
-        ctx, "POST", "/create-pdf-sidebar",
-        json={"document_structure": document_structure, "font": font, "font_size": font_size},
-    )
-
-
 # --- User PDF templates ----------------------------------------------------
-# One saved format per user — their branding, their layout — applied by the
-# backend to every PDF built for them. A template is a visual choice, so the
+# THE way a user gets reports in their own format. A saved template is a
+# BLUEPRINT — the author's stylesheet and page chrome plus one markup pattern
+# per content kind (title, lead, sections, bullets, KPI cards, tables, charts,
+# figure, source line, footnote) — which the backend applies automatically to
+# every PDF it renders for that user (`generate_report_for_stock`, scheduled
+# reports). Nobody fills template markup: a template is structure and style;
+# the document supplies the content. A template is a visual choice, so the
 # flow is draft (rendered previews) -> the user looks and picks -> save the
-# exact markup they approved. Nothing is stored until the save.
+# treatment they approved -> `update_user_template` for later changes.
+#
+# There is no agent-driven PDF builder here any more: the build_pdf_* tools
+# over /create-pdf and /create-pdf-sidebar (and the pdf_options catalogue that
+# described their tag DSL) were retired in favour of templates. When a user
+# wants a document composed from Flexreport data that no backend report
+# covers, the agent builds the PDF with its own document tooling and, if the
+# user has a saved template (`get_user_template`), lays the content out in
+# that format; if none is saved, it offers to draft one.
 
 _TemplateType = Literal["add_on", "bespoke"]
-_TemplateFormat = Literal["html", "markdown"]
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Draft PDF Template Previews", readOnlyHint=False, destructiveHint=False))
@@ -962,39 +865,42 @@ async def draft_user_template(
     template: str,
     template_type: _TemplateType,
     anchor: Optional[str] = None,
-    template_format: _TemplateFormat = "html",
 ) -> Any:
     """Render preview images of a user's PDF template so they can approve it BY LOOKING, before anything is saved.
 
     THE POINT: a user wants their research in THEIR format — their masthead, colours,
-    layout, branding. A template is a visual choice, so it is signed off by looking
-    at rendered pages, never by describing them. This is STEP 1 OF 2: it returns
-    several treatments of the submitted template, each rendered as PNG previews at
-    the size and on the surface it will actually occupy in a report. NOTHING IS
+    layout, branding. A saved template is a BLUEPRINT: the author's stylesheet and
+    page chrome plus one markup pattern per content kind, which the backend applies
+    automatically to every PDF it renders for that user. A template is a visual
+    choice, so it is signed off by looking at rendered pages, never by describing
+    them. This is STEP 1 OF 2: it compiles the submitted HTML into a blueprint under
+    several treatments and renders each one as PNG previews of the platform's
+    SPECIMEN DOCUMENT — one of every content kind (title, lead, sections, bullets,
+    KPI cards, tables, charts, figure, source line, footnote). The user signs off on
+    how the design treats each kind of content, not on sample text. NOTHING IS
     STORED — the draft lives in a 24-hour cache; `save_user_template` is step 2.
 
     THE FLOW:
-      1. Author the template with the user (or take the one they hand you).
+      1. Author the HTML with the user (or take the page they hand you).
       2. Call this. Show the user EVERY variant's `preview_urls` (render the images
          inline where the client can; otherwise give the links) with its `name` and
          `rationale`, side by side.
       3. The user picks one -> `save_user_template(draft_id, variant_id)`. Never save
-         a treatment the user has not seen and approved.
+         a treatment the user has not seen and approved. Later changes go through
+         `update_user_template`.
 
     `template_type`:
-      - "add_on"  — replaces ONE section of the standard report layout and keeps the
-        rest. `anchor` is REQUIRED: the section it replaces, matched as a substring
+      - "add_on"  — restyles ONE section of the standard report layout and keeps the
+        rest. `anchor` is REQUIRED: the section it applies to, matched as a substring
         against the document's block keys (e.g. "technical", "financials",
         "ownership"). The previews are rendered at the 360pt column width the block
         will occupy inside a report — anything wider is clipped, not scaled — and
         the treatments restyle it to sit inside the host document (its own page
         background, masthead and disclaimer are stripped).
-      - "bespoke" — the template IS the whole document. There is nothing to adapt,
-        so it is previewed unchanged, as full pages (one variant, "As submitted").
+      - "bespoke" — the template drives the whole document: page chrome, stylesheet
+        and the pattern for every content kind, previewed as full pages.
 
-    `template_format` must be "html" here — a markdown template renders through the
-    standard text styles and has nothing to preview; save it directly with
-    `save_user_template`.
+    HTML ONLY: a template is a page design, so the backend rejects markdown (422).
 
     TEMPLATE RULES (violations come back as a 422 with `detail.errors`):
       - Real CSS engine: grid, flexbox, gradients, absolute positioning all work.
@@ -1002,9 +908,8 @@ async def draft_user_template(
       - Only `data:` URIs for images. External images, stylesheets and web fonts are
         BLOCKED; <script>, <link> and similar are stripped.
       - Max 200 KB; must parse as HTML.
-      - Put realistic PLACEHOLDER VALUES where live figures go ("$182.40", "RSI 61",
-        "Buy", a marker at left:62%) — the save step compiles exactly those into
-        {{placeholders}} with a schema, so what looks like a number becomes one.
+      - Write the sample as a complete page in the intended style; its content is
+        discarded at save — only the structure and styling are kept.
 
     Returns {"draft_id", "variants": [{"variant_id", "name", "rationale",
     "preview_urls": [...], "preview_pages"}], "expires_in_seconds", "next_step",
@@ -1019,13 +924,13 @@ async def draft_user_template(
     if not (template or "").strip():
         return {"error": "template is required — the HTML to preview."}
     if template_type == "add_on" and not (anchor or "").strip():
-        return {"error": "anchor is required for an add_on template — the section it replaces (e.g. 'technical')."}
+        return {"error": "anchor is required for an add_on template — the section it applies to (e.g. 'technical')."}
     return await _send(
         ctx, "POST", "/draft-user-template",
         json={
             "template": template,
             "template_type": template_type,
-            "template_format": template_format,
+            "template_format": "html",
             "anchor": anchor,
         },
     )
@@ -1038,46 +943,42 @@ async def save_user_template(
     variant_id: Optional[str] = None,
     template: Optional[str] = None,
     template_type: Optional[_TemplateType] = None,
-    template_format: _TemplateFormat = "html",
     anchor: Optional[str] = None,
 ) -> Any:
-    """Save the user's PDF format — one template per account, applied to every PDF built for them from now on.
+    """Save the user's PDF format — one template per account, applied automatically to every PDF the backend renders for them from now on.
 
     STEP 2 OF 2 after `draft_user_template`. Two ways to call it:
 
     SIGNED-OFF (the normal path): pass `draft_id` and the `variant_id` the user chose
-    from the previews. The EXACT markup they looked at is stored — no second
+    from the previews. The EXACT treatment they looked at is stored — no second
     adaptation pass that could produce something they never saw. `template`,
     `template_type` and `anchor` are taken from the draft and may be omitted. A 404
     means the draft expired (24h) or the variant does not exist: draft again.
 
     DIRECT (no previews): pass `template` + `template_type` (+ `anchor` for an
-    add_on). Use this for a markdown template, or when the user explicitly wants to
-    skip the previews. An html add_on saved this way still gets an unreviewed
-    harmonise pass, so prefer the signed-off path for anything visual.
+    add_on) — only when the user explicitly wants to skip the previews. An add_on
+    saved this way still gets an unreviewed harmonise pass, so prefer the signed-off
+    path for anything visual. HTML only: markdown is rejected with a 422.
 
     ONE TEMPLATE PER USER — this is an UPSERT: saving replaces whatever was saved
     before, with no history. Call `get_user_template` first and confirm with the user
-    before overwriting an existing format.
+    before overwriting an existing format. To change a saved format afterwards, use
+    `update_user_template` (any field, or none to recompile it as stored).
 
-    WHAT CHANGES AFTERWARDS: the backend applies the template to this user's PDFs.
-      - Agent-built PDFs (`build_pdf_full_width` / `build_pdf_sidebar`):
-        `list_options("pdf_options")` now returns a `user_template` block with the
-        stored markup and instructions — fill it with real data, keep the markup
-        and classes exactly, and post it under document_structure["user_template_main"].
-        The backend does the swap: an add_on replaces the anchored section, a
-        bespoke replaces the whole document. The build response carries
-        `template_applied: true` when it took.
-      - Backend-generated reports (`generate_report_for_stock`, scheduled reports)
-        fill the compiled {{placeholders}} automatically.
+    WHAT CHANGES AFTERWARDS: the backend renders every PDF it builds for this user —
+    `generate_report_for_stock` (standard and custom) and scheduled reports — through
+    the saved format. The template is a blueprint (stylesheet, page chrome, one
+    pattern per content kind) applied to the document's own content: nothing is
+    filled in by hand, and no other call changes. When you compose a PDF yourself
+    from Flexreport data, `get_user_template` returns the markup to lay it out in.
 
-    Returns {"status": 201 (created) | 200 (replaced), "template_type",
-    "template_format", "anchor", "bytes", "placeholders": [{"name", "description",
-    "kind", "example"}], "warnings"}. `placeholders` are the parts of the template
-    that became dynamic — tell the user what will update per report. A warning
-    "keeping the previously compiled version" means the new compile was rejected and
-    the previous compiled schema stays in force; the markup itself is still saved.
-    Validation failures are a 422 with `detail.errors` listing each problem.
+    Returns {"status": "SAVED", "template_type", "anchor", "bytes", "patterns":
+    [content kinds the design styles], "tones": {positive | negative | neutral |
+    accent: css class}, "warnings"}. Tell the user which content kinds their design
+    styles. A warning "keeping the previously compiled blueprint" means the new
+    compile was rejected and the previous blueprint stays in force; the markup
+    itself is still saved. Validation failures are a 422 with `detail.errors`
+    listing each problem.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     Rate-limited 100/min.
@@ -1090,7 +991,7 @@ async def save_user_template(
         if template_type is None:
             return {"error": "template_type is required ('add_on' or 'bespoke') when saving a template directly."}
         if template_type == "add_on" and not (anchor or "").strip():
-            return {"error": "anchor is required for an add_on template — the section it replaces (e.g. 'technical')."}
+            return {"error": "anchor is required for an add_on template — the section it applies to (e.g. 'technical')."}
 
     # The backend body model requires `template` and `template_type` even on the
     # sign-off path, where the draft supplies both and overrides whatever is sent —
@@ -1098,7 +999,7 @@ async def save_user_template(
     payload: dict[str, Any] = {
         "template": template or "",
         "template_type": template_type or "add_on",
-        "template_format": template_format,
+        "template_format": "html",
         "anchor": anchor,
     }
     if draft_id is not None:
@@ -1107,19 +1008,67 @@ async def save_user_template(
     return await _send(ctx, "POST", "/save-user-template", json=payload)
 
 
+@mcp.tool(annotations=ToolAnnotations(title="Update Saved PDF Template", readOnlyHint=False, destructiveHint=False, idempotentHint=True))
+async def update_user_template(
+    ctx: Context,
+    template: Optional[str] = None,
+    template_type: Optional[_TemplateType] = None,
+    anchor: Optional[str] = None,
+    draft_id: Optional[str] = None,
+    variant_id: Optional[str] = None,
+) -> Any:
+    """Change your saved PDF template — any field, or none to recompile it as stored.
+
+    Complements `draft_user_template` (preview), `save_user_template` (create) and
+    `delete_user_template` (remove). Every argument is optional; a field you omit
+    keeps its stored value, and the result is compiled into a blueprint again:
+      - a VISUAL change: draft the new page with `draft_user_template`, show the
+        previews, then pass the chosen `draft_id` + `variant_id` here (both or
+        neither);
+      - a change without previews: pass `template`, `template_type` and/or
+        `anchor` directly (HTML only — markdown is rejected with a 422);
+      - NO arguments: recompiles the stored template with the current compiler —
+        how a saved design picks up an improved compile without resubmitting it.
+
+    Async: returns {"task_id", "status": "PENDING", "changed": [the fields that
+    were updated], "next_step"} — poll `get_task_status` for {"status": "SAVED",
+    "patterns", "tones", "warnings"}. A 404 means nothing is saved yet (use
+    `save_user_template` first); a 422 lists validation errors in `detail.errors`.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    """
+    if (draft_id is None) != (variant_id is None):
+        return {"error": "draft_id and variant_id go together — pass both (from draft_user_template) or neither."}
+    body: dict[str, Any] = {}
+    if template is not None:
+        body["template"] = template
+        body["template_format"] = "html"
+    if template_type is not None:
+        body["template_type"] = template_type
+    if anchor is not None:
+        body["anchor"] = anchor
+    if draft_id is not None:
+        body["draft_id"] = draft_id
+        body["variant_id"] = str(variant_id)
+    return await _send(ctx, "PUT", "/update-user-template", json=body)
+
+
 @mcp.tool(annotations=ToolAnnotations(title="Get Saved PDF Template", readOnlyHint=True))
 async def get_user_template(ctx: Context) -> Any:
     """Return the PDF template this user has saved, or a 404 if they have none.
 
-    Call it to answer "what format am I on?", and BEFORE `save_user_template` when a
-    template may already exist — saving replaces it without history, so the user
-    should know what they are overwriting.
+    Call it to answer "what format am I on?", BEFORE `save_user_template` when a
+    template may already exist (saving replaces it without history, so the user
+    should know what they are overwriting), and whenever you are about to compose
+    a PDF yourself from Flexreport data: lay the content out in this markup so the
+    document matches the user's format. A 404 there is the cue to offer drafting
+    one (`draft_user_template` -> previews -> `save_user_template`).
 
     Returns {"template_type", "template_format", "anchor", "template", "created_at",
     "updated_at"}. `template` is the sanitized markup as submitted (up to 200 KB) —
-    the reviewed/compiled copy the backend renders from is not returned. To change
-    the format, go through `draft_user_template` again rather than editing this
-    text blind.
+    the compiled blueprint the backend renders from is not returned. To change the
+    format, draft again and pass the chosen variant to `update_user_template`
+    rather than editing this text blind.
 
     An HTTP 404 means no template is saved — the standard layouts are in force. An
     HTTP 503 means the backend's user_templates table has not been created yet, NOT
