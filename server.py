@@ -68,6 +68,20 @@ _OPTION_ENDPOINTS = {
     "technical_indicators": "/list-technical-indicators",
     "tickers": "/list-tickers",
     "tickers_with_names": "/list-symbols-with-names",
+    # Report vocabularies scoped by a query parameter (see _OPTION_QUERY_PARAMS).
+    "as_reported_items": "/list-as-reported-items",
+    "revenue_segments": "/list-revenue-segments",
+    "institutional_managers": "/list-institutional-managers",
+}
+
+# Catalogues that take a query parameter: a filer's own vocabularies (its tagged XBRL
+# concepts, its revenue segments) need a `ticker`; the manager lookup needs a name
+# fragment `q` and/or a SEC `cik`. `list_options` forwards whichever were passed and
+# refuses the call when none of the kind's parameters is present.
+_OPTION_QUERY_PARAMS: dict[str, tuple[str, ...]] = {
+    "as_reported_items": ("ticker",),
+    "revenue_segments": ("ticker",),
+    "institutional_managers": ("q", "cik"),
 }
 
 # The `kind` schema advertised to MCP clients. Members must stay in lockstep
@@ -86,8 +100,21 @@ _OptionKind = Literal[
     "technical_indicators",
     "tickers",
     "tickers_with_names",
+    "as_reported_items",
+    "revenue_segments",
+    "institutional_managers",
 ]
 assert set(get_args(_OptionKind)) == set(_OPTION_ENDPOINTS)
+assert set(_OPTION_QUERY_PARAMS) <= set(_OPTION_ENDPOINTS)
+
+# The fields that shape a CUSTOM company report — Report.OVERRIDE_FIELDS on the backend.
+# Setting any of them turns /create-full-report into a full rebuild (~10 min, never
+# cached) and the backend rejects them (422) unless `user_override` is also true.
+_REPORT_SHAPING_FIELDS = (
+    "financial_items", "as_reported_financial_items", "ratios", "revenue_segment",
+    "technical_analysis_items", "estimate_items", "institutional_ownership",
+    "include_as_report_financials", "as_reported_periods",
+)
 
 mcp = FastMCP(
     "flexreport",
@@ -332,67 +359,120 @@ async def list_realtime_events(
 
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Generate Bespoke Stock Report", readOnlyHint=False, destructiveHint=False))
+@mcp.tool(annotations=ToolAnnotations(title="Generate Stock Report", readOnlyHint=False, destructiveHint=False))
 async def generate_report_for_stock(
     ctx: Context,
     ticker: str,
-    overrides: Optional[dict] = None,
+    user_override: bool = False,
+    financial_items: Optional[list[str]] = None,
+    as_reported_financial_items: Optional[list[str]] = None,
+    ratios: Optional[list[str]] = None,
+    revenue_segment: Optional[list[str]] = None,
+    technical_analysis_items: Optional[list[str]] = None,
+    estimate_items: Optional[list[str]] = None,
+    institutional_ownership: Optional[list[str]] = None,
+    include_as_report_financials: bool = False,
+    as_reported_periods: Optional[list[str]] = None,
 ) -> Any:
-    """Build a NEW BESPOKE report on the fly for one ticker (slow, async; takes ~10 minutes).
+    """Build a report for ONE ticker. Two modes — pick by what the user asked for.
 
-    ===> This is an on-demand tool to create a fresh report on a company for a user. The suggested use is:
-      (a) `get_latest_report` has no cached report for the ticker (it came back in
-          `missing`), so there is nothing pre-built to return, OR the cached report is stale OR
-      (b) the user EXPLICITLY wants the report to EMPHASIZE specific line items, ratios,
-          estimates, or technical indicators that the cached report does not already
-          highlight.
+    STANDARD (ticker only, ~10-20 seconds): renders the symbol's saved report plan — the
+    query plan the platform's ETLs built the first time anyone asked for the symbol and
+    refresh nightly while its inputs keep changing. Call it this way when
+    `get_latest_report` came back `stale: true` for the ticker (the cached PDF predates
+    the symbol's latest report inputs — a print, a filing, a 13F refresh) or listed it
+    in `missing`. The finished PDF replaces the cached one. If the saved plan is itself
+    stale or absent, the backend rebuilds it (~10 min) and saves it for next time — so
+    poll the task rather than assume a fixed runtime.
 
-    Use the cached first, then this second. This should not be confused with generate_research_report, which should be used for more open-ended questions or when doing things like peer comps. generate_report_for_stock is dedicated to one ticker where the user's intent is very clear e.g. has an explicit set of metrics to focus on.
+    CUSTOM (`user_override=true` + the shaping fields, ~10 minutes, NOT cached): a full
+    rebuild from scratch around what the user named. Use it ONLY when the user
+    EXPLICITLY wants the report to cover specific line items, ratios, segments,
+    indicators, estimates, or holders. Every field below shapes a custom report, and the
+    backend rejects it (422) without `user_override=true` — this tool sets the switch
+    for you whenever any of them is non-empty, so a shaped request is never silently
+    served the standard report. Vocabularies — never guess, look each one up:
+      financial_items              standardized EDGAR line items ("revenue",
+                                   "operatingIncome") -> list_options("financial_items")
+      ratios                       EDGAR ratios ("grossProfitMargin")
+                                   -> list_options("financial_ratios")
+      as_reported_financial_items  the filer's OWN tagged XBRL concepts
+                                   ("us-gaap_RevenueFromContractWithCustomer...", or a
+                                   company extension such as "snow_...")
+                                   -> list_options("as_reported_items", ticker=...)
+      revenue_segment              the filer's revenue segments ("Product revenue")
+                                   -> list_options("revenue_segments", ticker=...)
+      technical_analysis_items     indicators to chart ("rsi", "macd")
+                                   -> list_options("technical_indicators")
+      estimate_items               estimate line items to compare against actuals
+      institutional_ownership      managers to feature, by SEC CIK (any width; the
+                                   backend pads to 10 digits)
+                                   -> list_options("institutional_managers", q="berkshire")
+                                   returns {cik, name, category, aum}; pass the `cik`
+                                   values, never names
+      include_as_report_financials adds an AS-REPORTED statement section built from the
+                                   SEC filing itself, every figure a tagged XBRL fact
+                                   that deep-links to its location in the filed
+                                   document (distinct from the standardized tables,
+                                   whose derived figures no filer states). Line items:
+                                   `as_reported_financial_items` when given, else
+                                   chosen to match the narrative
+      as_reported_periods          which window(s) that section shows: "quarter"
+                                   (discrete three months, the default), "ytd"
+                                   (cumulative), "annual" (fiscal year, from the
+                                   10-K). Several render as adjacent columns. Not
+                                   cosmetic: a filing states the same concept over
+                                   more than one window at the SAME period end, so
+                                   the basis must be explicit
 
-    Only `ticker` is required; the backend composes the report dynamically around the
-    company's latest platform events and applies sensible defaults. The `overrides`
-    keys the backend honors (all optional — any other key is accepted but IGNORED):
-      - "financial_items", "ratios", "estimate_items" (lists) — must-cover EMPHASIS
-        items woven into the report's coverage. Discover valid values with
-        `list_options`: "financial_items" and "financial_ratios".
-      - "technical_analysis_items" (list) — indicators to CHART; valid values via
-        `list_options("technical_indicators")`.
-      - "investment_thesis_impact", "significant_changes", "change_summary" (strings) —
-        editorial steer: frames the report as a company update built around these points.
-      - "use_api_financials" (bool) — source YoY financials live from the upstream data
-        provider instead of the platform's cached view (fresher, slower).
-      - "include_financials" / "include_ownership" (bools) — nudge the report's framing
-        (financials-release vs ownership-change) when no recent platform event exists.
-    Do NOT pass "include_transcript", "filing_frequency", "institutional_ownership", or
-    price-date fields — the dynamic report builder ignores them.
+    Event context is SERVER-owned: the backend reads the symbol's latest platform event
+    and frames the report around it. There is no thesis / change-summary / include_* /
+    price-date field any more — do not send editorial steer; unknown keys are ignored.
 
+    CHOOSING THE SHAPING FIELDS FROM THE ONTOLOGY (custom mode only — do not guess):
+    read get_company_event_web(ticker) for the latest node, then
+    get_event_ontology(event_type=node.type), and derive from the card's family and
+    `informs`:
+      earnings family          -> financial_items + estimate_items from the fundamentals
+                                  and estimates families the card informs; add
+                                  include_as_report_financials when the user wants the
+                                  filed statement (a 10-Q / 10-K anchored event)
+      institutional_ownership  -> institutional_ownership CIKs from the web node's
+                                  fetch.cik (a 13F node is FILER-scoped: one filer's
+                                  move across several names)
+      market_movement / news   -> technical_analysis_items from the technical_indicators
+                                  family (validate names via list_options)
+      analyst_activity         -> estimate_items + ratios
+    Omit anything the ontology gives no reason for.
 
+    Not `generate_research_report`: that answers an open-ended or multi-company
+    question (peer comps, a theme). This tool is one ticker — and in custom mode, a
+    very clear list of what to cover.
 
-    This is asynchronous. The response is keyed by ticker, e.g.
-    {"AAPL": {"task_id": "...", "status": "PENDING"}}. Read result["AAPL"]["task_id"]
-    and poll it with `get_task_status` until status is SUCCESS; the result carries the
-    finished report as {"pdf": "<base64>", ...}.
-
-    CHOOSING `overrides`: do not guess. Read get_company_event_web(ticker) for the
-    latest event node, then get_event_ontology(event_type=node.type), and derive the
-    overrides from the card's family and `informs`:
-      earnings family            -> include_financials=True; financial_items /
-                                    estimate_items from the estimates + fundamentals
-                                    families the card informs; use_api_financials=True
-                                    ONLY if financial_timeseries_analysis has not
-                                    refreshed since the event (next_run_at check).
-      institutional_ownership    -> include_ownership=True; note the card's `about`
-                                    (filer-scoped: the move is one filer across names).
-      market_movement / news     -> technical_analysis_items from the technical_indicators
-                                    family (validate names via list_options);
-                                    investment_thesis_impact / significant_changes /
-                                    change_summary from the web node's headline.
-      analyst_activity           -> estimate_items + ratios; frame change_summary around
-                                    the rating / estimate move.
-    Omit overrides the ontology gives no reason for — the backend's defaults are already
-    event-aware.
+    Asynchronous. Returns {"<TICKER>": {"task_id": "...", "status": "PENDING"}}: read
+    result[ticker]["task_id"] and poll it with `get_task_status` until SUCCESS; the
+    result carries the finished report as {"pdf": "<base64>", ...}. Requires auth
+    (your MCP client attaches the OAuth bearer automatically).
     """
-    payload = {"ticker": ticker, **(overrides or {})}
+    shaping: dict[str, Any] = {
+        "financial_items": financial_items,
+        "as_reported_financial_items": as_reported_financial_items,
+        "ratios": ratios,
+        "revenue_segment": revenue_segment,
+        "technical_analysis_items": technical_analysis_items,
+        "estimate_items": estimate_items,
+        "institutional_ownership": institutional_ownership,
+        "include_as_report_financials": include_as_report_financials,
+        "as_reported_periods": as_reported_periods,
+    }
+    assert set(shaping) == set(_REPORT_SHAPING_FIELDS)
+    payload: dict[str, Any] = {"ticker": ticker}
+    # Only non-empty fields travel: the backend defaults every list to [] and every flag
+    # to false, and treats a set field as "custom". Any shaped request carries the
+    # switch so it is never rejected with a 422 nor quietly served the standard plan.
+    payload.update({k: v for k, v in shaping.items() if v})
+    if user_override or len(payload) > 1:
+        payload["user_override"] = True
     return await _send(
         ctx, "POST", "/create-full-report", json=payload
     )
@@ -603,16 +683,32 @@ async def get_latest_report(
 
     Accepts one OR many symbols. Returns
     {"result": [{"symbol": "AAPL", "url": "<presigned pdf url>",
-                 "report": "<base64 pdf>"}, ...],
+                 "report": "<base64 pdf>", "generated_at": "<iso utc>",
+                 "age_hours": 5.2, "latest_event_at": "<iso>", "stale": false}, ...],
     "missing": ["XYZ", ...]}. Each hit carries BOTH representations of the same
-    PDF: `url` is a short-lived presigned link (valid ~12h) — hand it to the user
+    PDF: `url` is a short-lived presigned link (valid ~6h) — hand it to the user
     to download/open the document directly (and prefer it on clients that can't
     handle a large base64 blob); `report` is the inline base64 PDF — decode it to
-    read, render, or summarize the report's contents yourself. `missing` lists
-    symbols with no cached report (for those, the user may want `onboard_symbol`
-    to add coverage). Symbols are normalized (uppercased, de-duplicated) by
-    the backend.
+    read, render, or summarize the report's contents yourself. Symbols are
+    normalized (uppercased, de-duplicated) by the backend.
 
+    FRESHNESS — read `stale` BEFORE you hand a report over. Nothing regenerates on
+    its own under the on-demand model; the flag tells you when to ask for a rebuild:
+      stale: false -> the PDF reflects the symbol's latest report inputs. Serve it.
+      stale: true  -> the PDF predates the symbol's latest report inputs — a print, a
+                      filing, a 13F refresh landed after `generated_at`
+                      (`latest_event_at` says when). Call
+                      generate_report_for_stock(ticker) — ticker ONLY, no shaping
+                      fields — which renders the symbol's saved plan in ~10-20 s;
+                      poll its task_id with `get_task_status` and hand the user THAT
+                      report. Say the cached copy was out of date and is being
+                      refreshed; offer the stale one only if they cannot wait.
+      stale: null  -> no report inputs are known for the symbol, so freshness cannot
+                      be judged. Serve the PDF and quote `generated_at` / `age_hours`.
+      in `missing` -> no cached report at all. generate_report_for_stock(ticker)
+                      builds one (a symbol's FIRST build is a full ~10 min run and
+                      is saved for next time), or `onboard_symbol` if the ticker is
+                      not covered.
     """
     return await _send(
         ctx, "POST", "/get-cached-reports", json=symbols
@@ -656,19 +752,47 @@ async def download_pdf_from_url(
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List Valid Parameter Options", readOnlyHint=True))
-async def list_options(ctx: Context, kind: _OptionKind) -> Any:
+async def list_options(
+    ctx: Context,
+    kind: _OptionKind,
+    ticker: Optional[str] = None,
+    q: Optional[str] = None,
+    cik: Optional[str] = None,
+) -> Any:
     """Enumerate the valid values for a parameter, straight from the backend.
 
-    Call this BEFORE guessing a parameter value. `kind` selects which catalog:
+    Call this BEFORE guessing a parameter value. `kind` selects which catalog; three
+    kinds are scoped by a query parameter (`ticker`, or `q` / `cik`) and refuse the call
+    without it:
 
     - "event_types"                  -> valid `event_type` for `list_realtime_events`
                                         (eps_update, company_update, biggest_mover, ...)
-    - "financial_items"              -> line items usable in a scheduled report's
-                                        `overrides` (schedule_task task_type="report")
-    - "financial_ratios"             -> ratios usable in those `overrides.ratios`
+    - "financial_items"              -> standardized EDGAR line items ("revenue",
+                                        "operatingIncome") for a CUSTOM report's
+                                        `financial_items` (`generate_report_for_stock`,
+                                        or a scheduled "create-full-report" step)
+    - "financial_ratios"             -> EDGAR ratios ("grossProfitMargin") for that
+                                        report's `ratios`
+    - "as_reported_items"            -> NEEDS `ticker`. The filer's OWN tagged XBRL
+                                        concepts from its 10-Q / 10-K filings — {concept,
+                                        statement_type, label, standard_concept,
+                                        latest_period, facts} — for a custom report's
+                                        `as_reported_financial_items`
+    - "revenue_segments"             -> NEEDS `ticker`. The filer's revenue segments as
+                                        tagged in its filings — {product_label,
+                                        product_member, product_axis, concept,
+                                        latest_period, facts} — for a custom report's
+                                        `revenue_segment` (pass the product_label).
+                                        A name lookup only: never sum members across it
+    - "institutional_managers"       -> NEEDS `q` (name fragment, e.g. "berkshire")
+                                        and/or `cik` (SEC CIK, any width). Managers as
+                                        {cik, name, category, aum}, largest AUM first —
+                                        pass the `cik` values as a custom report's
+                                        `institutional_ownership`, never the names
     - "sectors"                      -> valid `sector` filter values
-    - "institutional_investor_types" -> valid `overrides.institutional_ownership`
-                                        values for a scheduled report
+    - "institutional_investor_types" -> investor CATEGORIES (not managers) — the keys
+                                        `screen_stocks(institutional_ownership=...)`
+                                        filters on
     - "countries"                    -> covered countries
     - "fiscal_quarter"               -> the most recent fiscal quarter being reported
     - "market_cap"                   -> valid `market_cap` buckets (Small-cap,
@@ -699,7 +823,16 @@ async def list_options(ctx: Context, kind: _OptionKind) -> Any:
     Authoritative and never stale: it reads the backend's live config, not a
     hardcoded list. Public — no auth required.
     """
-    return await _send(ctx, "GET", _OPTION_ENDPOINTS[kind], require_auth=False)
+    wanted = _OPTION_QUERY_PARAMS.get(kind, ())
+    given = {"ticker": ticker, "q": q, "cik": cik}
+    params = {name: given[name] for name in wanted if given[name]}
+    if wanted and not params:
+        return {"error": f'list_options("{kind}") needs {" and/or ".join(wanted)} — '
+                         "pass it as a keyword argument."}
+    return await _send(
+        ctx, "GET", _OPTION_ENDPOINTS[kind],
+        params=params or None, require_auth=False,
+    )
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List Sub-Industries", readOnlyHint=True))
@@ -1936,7 +2069,11 @@ async def schedule_task(
     - EXPENSIVE — max 2 per workflow, and the cron must use a literal minute and
       at most 4 literal hours (no sub-hourly / "*" fields): "screen-stocks"
       (`screen_stocks`), "generate-research-report" ({"query": "..."}),
-      "create-full-report" ({"ticker": "..."} + report overrides),
+      "create-full-report" ({"ticker": "..."} for the symbol's standard report;
+      add "user_override": true plus the shaping lists `generate_report_for_stock`
+      takes — financial_items, ratios, as_reported_financial_items, revenue_segment,
+      technical_analysis_items, estimate_items, institutional_ownership CIKs — for a
+      custom one; the backend rejects the lists without the switch),
       "optimize-symbols", "optimize-portfolio", "list-optimized-stock-picks".
 
     `delivery` is "email" (default) or "dashboard".
