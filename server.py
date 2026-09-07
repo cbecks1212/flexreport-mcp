@@ -517,6 +517,23 @@ async def explore_data_catalogue(
 ) -> Any:
     """Explore Flexreport's data platform with an OPEN-ENDED question — designed to handle many research based or open ended questions, enabling interactive EDA.
 
+    ===> BEFORE running this, call `list_saved_queries` and match the question against
+    the saved rows. A row whose `user_request` has the same SHAPE — same metric, same
+    window, only the company / filer / date / count differs (saved: "the past 8
+    quarters of sales for TGT"; asked now: "KSS's last 8 quarters of sales") — is
+    answered by `run_saved_query(query_tokens=<that row's query_placeholder>,
+    prompt=<the user's words>)` in seconds: the backend re-aims the saved queries at
+    the new entities, no planning job, no draw on the 20/hour budget. An EXACT repeat
+    replays the row's `queries` tokens with no prompt. Only when nothing saved fits,
+    or the replay answers 422 (the request could not be mapped onto the saved slots),
+    run this tool.
+
+    ===> AFTER the exploration completes and the results are shown, offer ONCE to save
+    it with `save_user_query`: tell the user the request can then be re-run exactly
+    (same queries, live data) OR re-asked for other companies, filers, or windows in
+    seconds. Offer when the exploring is done, not mid-iteration, and never save by
+    reflex.
+
     ===> For anything EVENT-DRIVEN (a print, a filing, a 13F move, news, "what
     happened"), call `situate(...)` first and take this tool's `query` from its plan —
     the plan names the relations that HAVE refreshed since the event and omits the
@@ -564,11 +581,11 @@ async def explore_data_catalogue(
     Each entry ALSO carries `query_token`: the planned SQL sealed into an opaque token.
     It is not readable and never for display — its one use is `save_user_query`, which
     stores the tokens so `run_saved_query` can replay THIS EXACT request later in
-    seconds instead of re-planning it. Offer that when the user signals they will want
-    the question again (a recurring check, a dashboard they watch); a saved row also
-    spares the 20/hour budget. And before running this tool for something the user has
-    asked before, check `list_saved_queries` — the answer may already be one fast
-    replay away.
+    seconds instead of re-planning it. Saving also makes the backend author a
+    PLACEHOLDER twin of each query, so the same request can be re-asked for another
+    company, filer, or window with a `prompt`. That is what to offer once the
+    exploring is done (see the top of this docstring); a saved row also spares the
+    20/hour budget.
 
     Render each entry as a chart/table for the user. If the request can't be served from
     the platform's data, `result` instead carries a `validation_status` of "REJECTED"
@@ -1380,7 +1397,11 @@ def _query_token(reference: str) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Run Signed Drilldown Query", readOnlyHint=True))
-async def get_signed_sql_drilldown(ctx: Context, encrypted_query_token: str) -> Any:
+async def get_signed_sql_drilldown(
+    ctx: Context,
+    encrypted_query_token: str,
+    prompt: Optional[str] = None,
+) -> Any:
     """Fetch the rows behind an event-web drilldown from its server-minted query token.
 
     Some `get_company_event_web` nodes carry `signed_query_url` in their `fetch` hint —
@@ -1400,15 +1421,22 @@ async def get_signed_sql_drilldown(ctx: Context, encrypted_query_token: str) -> 
     HTTP 403 means the token is invalid or tampered — do not retry with an altered
     token; re-fetch the event web for a fresh link instead.
 
+    `prompt` (optional) re-aims a drilldown token that is a placeholder twin at other
+    entities ("the same rows for KSS"); the backend fills the twin's typed slots from
+    the wording and returns `parameters` alongside `rows`. Leave it out for a plain
+    event-web link — the rows come back unchanged. A 422 means the request could not
+    be mapped onto the token's slots. Not needed for the saved-query flow, which is
+    `run_saved_query`.
+
     Requires auth (your MCP client attaches the OAuth bearer automatically) — unlike
     `get_company_event_web`, which is public: the web hands out the LINK to anyone, but
     following it to the underlying rows is for signed-in users. A signed-out caller gets
     a not-authenticated error, not rows; the fix is signing in, never a different token.
     """
-    return await _send(
-        ctx, "GET", "/query-data",
-        params={"t": _query_token(encrypted_query_token)},
-    )
+    params: dict[str, Any] = {"t": _query_token(encrypted_query_token)}
+    if prompt and prompt.strip():
+        params["prompt"] = prompt.strip()
+    return await _send(ctx, "GET", "/query-data", params=params)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Save Data Request For Replay", readOnlyHint=False, destructiveHint=False))
@@ -1417,17 +1445,22 @@ async def save_user_query(
     user_request: str,
     query_tokens: list[str],
 ) -> Any:
-    """Save the queries an exploration already planned, so the same request can be replayed instantly.
+    """Save the queries an exploration already planned, so the request can be replayed instantly — exactly, or re-asked for other entities.
 
     THE POINT: `explore_data_catalogue` is a full validate -> plan -> run pipeline that
     re-authors the SQL from scratch on every call (~1-5 min, 20/hour). For a question
     the user will ask AGAIN — a recurring check, a dashboard they watch, "my usual
     semis screen" — save the tokens that exploration just produced. `run_saved_query`
     then re-runs exactly those queries against live data in seconds, with no planning
-    step and no async job to poll.
+    step and no async job to poll. The backend ALSO authors a PLACEHOLDER twin of each
+    saved query (its ticker, CIK list, date, interval, and count lifted into typed
+    slots), so the same request can later be re-asked for a different company, filer,
+    or window: `run_saved_query(query_placeholder, prompt="...for KSS")`.
 
-    WHEN TO CALL: after an exploration the user says (or clearly implies) they will
-    want again. Do NOT save every exploration by reflex, and do not save a one-off.
+    WHEN TO CALL: once an exploration is done and shown, offer it — say the request can
+    be re-run exactly or with different values — and save when the user says yes or
+    clearly implies they will want it again. Do NOT save every exploration by reflex,
+    and do not save a one-off.
 
     `user_request` — the natural-language request being saved, in the user's own words.
     It is the ONLY human-readable label on the saved row, so make it specific enough to
@@ -1446,9 +1479,12 @@ async def save_user_query(
     creates a SECOND row. Check `list_saved_queries` first and `delete_saved_query` the
     stale one rather than piling up near-duplicates.
 
-    Returns {"msg": "Successfully saved query: <user_request>"}. The row `id` is not in
-    the response — `list_saved_queries` has it, and it is what `delete_saved_query`
-    takes.
+    Returns {"msg": "Successfully saved query: <user_request>", "id": <row id>,
+    "placeholder_status": "PENDING" | "NOT_DISPATCHED"}. `id` is the delete key.
+    PENDING means the placeholder twins are being authored (~10-25 s) — the row's
+    `query_placeholder` in `list_saved_queries` is null until they land, and an exact
+    replay via `queries` works meanwhile. NOT_DISPATCHED means no twins will be
+    authored for this row: it can be replayed exactly but not re-aimed.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     Rate-limited 100/min.
@@ -1469,19 +1505,33 @@ async def list_saved_queries(
 ) -> Any:
     """List the data requests you have saved with `save_user_query`, newest first.
 
-    The entry point to the replay flow: check HERE before re-running
-    `explore_data_catalogue` for a question the user has asked before — a matching
-    saved row means the answer is seconds away via `run_saved_query` instead of a
-    ~1-5 minute planning job.
+    The entry point to the replay flow: check HERE FIRST, before running
+    `explore_data_catalogue` for any exploration question — a saved row that matches
+    the question, exactly OR in shape, means the answer is seconds away via
+    `run_saved_query` instead of a ~1-5 minute planning job.
 
     Returns {"count": N, "saved_queries": [{"id", "user_request", "queries",
-    "created_at", "updated_at"}, ...]}, the calling user's rows only:
+    "query_placeholder", "created_at", "updated_at"}, ...]}, the calling user's rows
+    only:
       - `user_request` is the natural-language label to match against what the user
-        just asked. Match on MEANING, not string equality — but a row that is merely
-        close is a DIFFERENT question; confirm with the user before replaying it.
-      - `queries` is the list of opaque query tokens — hand it straight to
-        `run_saved_query`. Never show a token to the user: it is ciphertext, not
-        content, and says nothing about what the query does.
+        just asked. Match on MEANING, not string equality. Two kinds of match:
+          * SAME request (same entities, same window) -> hand `queries` to
+            `run_saved_query` with no prompt; it replays exactly.
+          * SAME SHAPE, different values — the saved row asks the same metric over
+            the same kind of window for another company, filer, date, or count
+            (saved "the past 8 quarters of sales for TGT"; asked "KSS's last 8
+            quarters of sales") -> hand `query_placeholder` + the user's wording as
+            `prompt` to `run_saved_query`; the backend re-aims the saved queries.
+        A row that is merely close in TOPIC but asks a different thing is a DIFFERENT
+        question; confirm with the user before replaying it.
+      - `queries` is the list of opaque query tokens for an exact replay.
+      - `query_placeholder` is the list of placeholder-twin tokens, index-aligned with
+        `queries`, or null while the placeholder task has not run yet (seconds after
+        the save — replay `queries` exactly or list again shortly). Hand
+        `query_placeholder` + a prompt to `run_saved_query` to re-ask the request for
+        another company/filer/window; hand `queries` to replay it exactly.
+        Never show a token of either kind to the user: it is ciphertext, not content,
+        and says nothing about what the query does.
       - `id` is what `delete_saved_query` takes.
 
     `limit` is 1-500 (default 50). Duplicate `user_request` values are possible —
@@ -1501,8 +1551,9 @@ async def list_saved_queries(
 async def run_saved_query(
     ctx: Context,
     query_tokens: list[str],
+    prompt: Optional[str] = None,
 ) -> Any:
-    """Re-run a saved request's queries immediately against live data — no planning, no polling.
+    """Re-run a saved request's queries immediately against live data — exactly, or re-asked for other entities via `prompt`. No planning, no polling.
 
     The payoff of `save_user_query`: pass a saved row's `queries` array from
     `list_saved_queries` and each stored query runs as-is, returning fresh rows
@@ -1510,23 +1561,37 @@ async def run_saved_query(
     already covers the question — same SQL, current data, seconds instead of minutes,
     and it does not draw on the 20/hour exploration budget.
 
-    `query_tokens` — the saved row's `queries` list, verbatim (a full signed URL is
-    accepted and unwrapped). Max 25 per call. Tokens are server-minted only: never
-    construct or edit one, and never pass SQL. For a token that came from a
+    `query_tokens` — the saved row's `queries` list for an exact replay, or its
+    `query_placeholder` list when re-asking with a `prompt` — verbatim (a full signed
+    URL is accepted and unwrapped). Max 25 per call. Tokens are server-minted only:
+    never construct or edit one, and never pass SQL. For a token that came from a
     `get_company_event_web` node rather than a saved row, use
     `get_signed_sql_drilldown` — same endpoint, single node, drilldown framing.
 
+    `prompt` re-asks a saved request for other entities. Pass a saved row's
+    `query_placeholder` tokens (NOT its `queries` tokens) together with the user's
+    new wording, e.g. prompt="the past 8 quarters of sales for KSS". The backend maps
+    the request onto the row's typed slots (ticker, CIK list, date, interval, count)
+    and returns `parameters` — the values it substituted — alongside `rows`. Without
+    `prompt`, or with a plain `queries` token, the saved SQL replays unchanged. A 422
+    means the request could not be mapped onto the saved slots (unknown entity, wrong
+    shape) — fall back to `explore_data_catalogue` for that question. Tell the user
+    which values were substituted (from `parameters`), never guess them from the
+    wording.
+
     Returns {"queries_run": N, "results": [{"index": i, "format": "table",
-    "count": <row count>, "rows": [...]}, ...]}, in the SAME ORDER as `query_tokens`.
-    Rows only — the underlying SQL is never returned, by design. Describe the results
-    from the saved `user_request` and the columns, never by asserting what the query
-    does internally.
+    "count": <row count>, "rows": [...], "parameters": {...}?}, ...]}, in the SAME
+    ORDER as `query_tokens` (`parameters` appears only on a prompted replay). Rows
+    only — the underlying SQL is never returned, by design. Describe the results from
+    the saved `user_request`, the substituted `parameters`, and the columns, never by
+    asserting what the query does internally.
 
     Each token runs independently: one failure does not stop the rest, and that entry
     carries an "error" key instead of rows. A 403 means that token is invalid or
     tampered — do not retry it altered; the saved row is dead, so re-run
     `explore_data_catalogue`, `save_user_query` a fresh row, and `delete_saved_query`
-    the old one.
+    the old one. A 422 on a prompted replay is the mapping failure above, not a dead
+    row.
 
     A replay returning DIFFERENT rows than when it was saved is normal — it hits live
     data. Report what comes back now; never reconcile it against remembered numbers.
@@ -1535,16 +1600,20 @@ async def run_saved_query(
     """
     tokens = [_query_token(t) for t in query_tokens if t and t.strip()]
     if not tokens:
-        return {"error": "query_tokens is required — pass the `queries` array from list_saved_queries."}
+        return {"error": "query_tokens is required — pass the `queries` (or `query_placeholder`) array from list_saved_queries."}
     if len(tokens) > 25:
         return {"error": f"Too many query tokens ({len(tokens)}); a saved request holds a handful. Max 25 per call."}
+    prompt = prompt.strip() if prompt else None
 
     # Sequential, not fanned out: a saved request holds a few queries, each one is a
     # metered backend call, and keeping the order means `results[i]` always lines up
     # with `query_tokens[i]`. A failed token yields its error entry and the rest run.
+    # `prompt` rides along on every call: the backend fills a placeholder twin's slots
+    # from it and ignores it on a plain token.
     results: list[dict[str, Any]] = []
     for i, token in enumerate(tokens):
-        payload = await _send(ctx, "GET", "/query-data", params={"t": token})
+        params: dict[str, Any] = {"t": token, **({"prompt": prompt} if prompt else {})}
+        payload = await _send(ctx, "GET", "/query-data", params=params)
         results.append({"index": i, **(payload if isinstance(payload, dict) else {"result": payload})})
     return {"queries_run": len(results), "results": results}
 
