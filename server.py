@@ -594,8 +594,9 @@ async def explore_data_catalogue(
     `traceable` per "row" or only as a "cohort". That is the provenance of the numbers,
     not padding: quote `_source_url` when the user asks where a figure came from, and for anything
     you are about to publish — or the moment they ask for the filing, the quote, or
-    "how do you know" — pass `sources.relations[].relation` plus each row's grain
-    values to `trace_data_sources`, which resolves them to the source document, the
+    "how do you know" — pass `sources.relations[].relation` plus each row's
+    identifying columns (the grain AND its date) to `trace_data_sources`, which
+    resolves them to the source document, the
     section, or the verified quote behind the number. `get_document_section` then opens
     the exact speaker turn a transcript citation points at.
 
@@ -1475,8 +1476,9 @@ async def get_signed_sql_drilldown(
     "row" or only as a "cohort". That is the provenance of the numbers, not padding:
     quote `_source_url` when the user asks where a figure came from, and for anything
     you are about to publish — or the moment they ask for the filing, the quote, or
-    "how do you know" — pass `sources.relations[].relation` plus each row's grain
-    values to `trace_data_sources`, which resolves them to the source document, the
+    "how do you know" — pass `sources.relations[].relation` plus each row's
+    identifying columns (the grain AND its date) to `trace_data_sources`, which
+    resolves them to the source document, the
     section, or the verified quote behind the number. `get_document_section` then opens
     the exact speaker turn a transcript citation points at.
 
@@ -1573,9 +1575,13 @@ async def trace_data_sources(
     TWO WAYS IN, and the FIRST is preferred:
       1. `relation` + `keys` — `relation` is a name off the result's
          `sources.relations[].relation`; `keys` is one JSON object per row you want
-         traced, carrying that relation's grain values, e.g.
-         [{"symbol": "SNOW", "cik": "0001273087", "date": "2026-06-30"}]. The grain is
-         named in `sources.relations[].grain`. No token and no SQL, so this is the form
+         traced. Pass EVERY identifying column the row carries — the reported grain
+         AND the period/date — e.g. [{"symbol": "SNOW", "cik": "0001273087",
+         "date": "2026-06-30"}]. Extra columns are ignored; a missing one is fatal.
+         Grain alone is NOT always enough: the join behind a view can need a column
+         its `grain` does not list (current_institutional_holders_v reports grain
+         [symbol, cik] but joins on `date` too, and keys without it resolve nothing).
+         No token and no SQL, so this is the form
          that works when you assembled a table across several calls (`run_saved_query`
          issues one call per saved token, so a token only ever describes a fragment of
          what you ended up with) or filtered the rows yourself. Trace the rows you will
@@ -1605,8 +1611,9 @@ async def trace_data_sources(
     cited, and writing "per this filing, hedge funds own 4.1%" off a cohort row is the
     exact failure this field exists to prevent. "none" means the lineage reaches no
     document — say the number cannot be sourced rather than reaching for a plausible
-    filing. A `reason` of "no_keys" means the keys you passed did not match the grain,
-    not that the number is unsourced; re-read `grain` and pass those columns.
+    filing. A `reason` of "no_keys" means a column the join needs was missing
+    from every key object — nearly always the period/date — not that the number is
+    unsourced. Add the date and any other identifying column on the row, and re-call.
 
     `column` traces ONE column instead of the whole row — necessary for a YoY or
     change relation, where each value column resolves to a DIFFERENT filing (the
@@ -1929,8 +1936,9 @@ async def run_saved_query(
     `traceable` per "row" or only as a "cohort". That is the provenance of the numbers,
     not padding: quote `_source_url` when the user asks where a figure came from, and for anything
     you are about to publish — or the moment they ask for the filing, the quote, or
-    "how do you know" — pass `sources.relations[].relation` plus each row's grain
-    values to `trace_data_sources`, which resolves them to the source document, the
+    "how do you know" — pass `sources.relations[].relation` plus each row's
+    identifying columns (the grain AND its date) to `trace_data_sources`, which
+    resolves them to the source document, the
     section, or the verified quote behind the number. `get_document_section` then opens
     the exact speaker turn a transcript citation points at.
 
