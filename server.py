@@ -1377,7 +1377,7 @@ async def get_event_ontology(
     downstream relation's refreshed_by[].schedule[].next_run_at. If next_run_at is AFTER
     the event, that relation does NOT reflect the event yet. Do not query it for the
     reaction — use the intraday tools (detect_intraday_outlier_jumps,
-    get_aftermarket_quotes / get_aftermarket_trades) or say the daily table lags.
+    get_aftermarket_data) or say the daily table lags.
 
     Every edge carries `provenance` (mined | declared | pg_depend | static:tasks.py |
     beat | catalogue | data_model), the same honesty axis as the web's `cause`: mined
@@ -2068,79 +2068,38 @@ async def detect_intraday_outlier_jumps(
     )
 
 
-async def _query_aftermarket(
+@mcp.tool(annotations=ToolAnnotations(title="Get Aftermarket Data", readOnlyHint=True))
+async def get_aftermarket_data(
     ctx: Context,
-    path: str,
     symbols: list[str],
-    start_datetime: Optional[str],
-    end_datetime: Optional[str],
+    start_datetime: Optional[str] = None,
+    end_datetime: Optional[str] = None,
 ) -> Any:
-    """Build the AftermarketQuery body and forward it to a stored-data endpoint.
+    """Query STORED after-hours 15-minute bars (open/high/low/close/volume) for symbols.
 
-    `start_datetime`/`end_datetime` are only included when supplied so the backend
-    applies its defaults (start/end of today in ET) for whichever bound is omitted.
+    Returns the extended-hours bars the backend has captured for `symbols` — one row per
+    symbol per 15-minute bar, 16:00-20:00 ET, ordered by symbol then bar time DESC (so the
+    first row per symbol is the latest bar). Each row carries `symbol`, `date` (the bar's
+    ET wall-clock time), `open`, `high`, `low`, `close`, `volume`. This is the recorded
+    aftermarket tape, NOT a live feed; it is polled every 15 minutes from 16:30 ET through
+    the evening, so a bar can lag the wall clock by up to ~15 minutes. For a live intraday
+    read of the regular session use `detect_intraday_outlier_jumps` instead.
+
+    `start_datetime` and `end_datetime` bound the bar time and are ET wall-clock ISO-8601
+    timestamps (e.g. "2026-06-24T16:00:00"). Both are OPTIONAL: omit them and the backend
+    defaults to the start (00:00:00) and end (23:59:59) of today in ET, so leave them off
+    for "today's aftermarket tape". An empty list means no bars were captured in the
+    window (e.g. before 16:30 ET, or on a non-trading day) — not an error.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically). Rate-limited
+    to 300/minute per user server-side.
     """
     body: dict[str, Any] = {"symbols": symbols}
     if start_datetime:
         body["start_datetime"] = start_datetime
     if end_datetime:
         body["end_datetime"] = end_datetime
-    return await _send(ctx, "POST", path, json=body)
-
-
-@mcp.tool(annotations=ToolAnnotations(title="Get Aftermarket Trades", readOnlyHint=True))
-async def get_aftermarket_trades(
-    ctx: Context,
-    symbols: list[str],
-    start_datetime: Optional[str] = None,
-    end_datetime: Optional[str] = None,
-) -> Any:
-    """Query STORED aftermarket (extended-hours) TRADE data for symbols over a datetime range.
-
-    Returns the trade ticks the backend has ingested for `symbols`, filtered on
-    `ingested_at` between `start_datetime` and `end_datetime` (inclusive). Use it to
-    pull the recorded extended-hours tape — i.e. read back already-captured aftermarket
-    prints, NOT a live feed. For a live intraday read of the regular session use
-    `detect_intraday_outlier_jumps` instead.
-
-    `start_datetime` and `end_datetime` are ET wall-clock ISO-8601 timestamps
-    (e.g. "2026-06-24T16:00:00"). Both are OPTIONAL: omit them and the backend
-    defaults to the start (00:00:00) and end (23:59:59) of today in ET, so leave
-    them off for "today's aftermarket trades".
-
-    Requires auth (your MCP client attaches the OAuth bearer automatically). Rate-limited
-    to 300/minute per user server-side.
-    """
-    return await _query_aftermarket(
-        ctx, "/get-aftermarket-trades", symbols, start_datetime, end_datetime
-    )
-
-
-@mcp.tool(annotations=ToolAnnotations(title="Get Aftermarket Quotes", readOnlyHint=True))
-async def get_aftermarket_quotes(
-    ctx: Context,
-    symbols: list[str],
-    start_datetime: Optional[str] = None,
-    end_datetime: Optional[str] = None,
-) -> Any:
-    """Query STORED aftermarket (extended-hours) QUOTE data for symbols over a datetime range.
-
-    Returns the bid/ask quote ticks the backend has ingested for `symbols`, filtered on
-    `ingested_at` between `start_datetime` and `end_datetime` (inclusive). Use it to
-    pull the recorded extended-hours quotes — i.e. read back already-captured aftermarket
-    bid/ask data, NOT a live feed. The trade-print counterpart is `get_aftermarket_trades`.
-
-    `start_datetime` and `end_datetime` are ET wall-clock ISO-8601 timestamps
-    (e.g. "2026-06-24T16:00:00"). Both are OPTIONAL: omit them and the backend
-    defaults to the start (00:00:00) and end (23:59:59) of today in ET, so leave
-    them off for "today's aftermarket quotes".
-
-    Requires auth (your MCP client attaches the OAuth bearer automatically). Rate-limited
-    to 300/minute per user server-side.
-    """
-    return await _query_aftermarket(
-        ctx, "/get-aftermarket-quotes", symbols, start_datetime, end_datetime
-    )
+    return await _send(ctx, "POST", "/get-aftermarket-data", json=body)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Onboard New Symbol", readOnlyHint=False, destructiveHint=False))
@@ -2577,7 +2536,7 @@ async def is_market_open(ctx: Context, exchange: str = "NYSE") -> Any:
     offsets), `timezone`, and any additional-session bounds.
 
     Use it to route between the market-hours tools: when the market is CLOSED,
-    extended-hours data lives in `get_aftermarket_quotes`/`get_aftermarket_trades`;
+    extended-hours data lives in `get_aftermarket_data`;
     when OPEN, `detect_intraday_outlier_jumps` gives the live intraday read.
     No auth required.
 

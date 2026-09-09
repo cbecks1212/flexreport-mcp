@@ -37,8 +37,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "explore_data_catalogue": {"auth": "required", "sync": False},
     "get_task_status": {"auth": "none", "sync": True},
     "detect_intraday_outlier_jumps": {"auth": "required", "sync": True},
-    "get_aftermarket_trades": {"auth": "required", "sync": True},
-    "get_aftermarket_quotes": {"auth": "required", "sync": True},
+    "get_aftermarket_data": {"auth": "required", "sync": True},
     "get_company_snapshot": {"auth": "none", "sync": True},
     "get_company_event_web": {"auth": "none", "sync": True},
     "get_event_ontology": {"auth": "none", "sync": True},
@@ -398,9 +397,9 @@ def situate_symbol(
                               provenance="declared"))
         elif anchor_age_h < 24:
             d = (anchor_at or now).astimezone(ET).date().isoformat()
-            plan.append(_step("reaction", "get_aftermarket_trades",
+            plan.append(_step("reaction", "get_aftermarket_data",
                               {"symbols": [symbol], "start_datetime": f"{d}T16:00:00", "end_datetime": f"{d}T20:00:00"},
-                              f"{primary['type']} landed < 24h ago and the market is closed — the reaction is in the extended-hours tape",
+                              f"{primary['type']} landed < 24h ago and the market is closed — the reaction is in the stored after-hours 15-minute bars",
                               provenance="declared"))
         elif eod and eod.get("reflects_newest_event"):
             guidance.append(f"{symbol}: the reaction to {primary['type']} ({primary['at']}) is already in eod_stock_prices "
