@@ -588,6 +588,17 @@ async def explore_data_catalogue(
     for those slots. That is what to offer once the exploring is done (see the top of
     this docstring); a saved row also spares the 20/hour budget.
 
+    CITE WHAT YOU PUBLISH: a result's `columns`/`rows` may carry `_source_*` columns —
+    `_source_url`, `_source_filed_at`, `_source_document_id`, `_source_citations` —
+    alongside a `sources` block naming each relation, its grain, and whether it is
+    `traceable` per "row" or only as a "cohort". That is the provenance of the numbers,
+    not padding: quote `_source_url` when the user asks where a figure came from, and for anything
+    you are about to publish — or the moment they ask for the filing, the quote, or
+    "how do you know" — pass `sources.relations[].relation` plus each row's grain
+    values to `trace_data_sources`, which resolves them to the source document, the
+    section, or the verified quote behind the number. `get_document_section` then opens
+    the exact speaker turn a transcript citation points at.
+
     Render each entry as a chart/table for the user. If the request can't be served from
     the platform's data, `result` instead carries a `validation_status` of "REJECTED"
     (with a reason) — relay that rather than retrying blindly.
@@ -1458,6 +1469,17 @@ async def get_signed_sql_drilldown(
     `is_new_record: true` and the remaining rows are the prior/context records to read
     it against (the node's `signed_query_context` describes what they are).
 
+    CITE WHAT YOU PUBLISH: the rows may carry `_source_*` columns — `_source_url`,
+    `_source_filed_at`, `_source_document_id`, `_source_citations` — and the response a
+    `sources` block naming each relation, its grain, and whether it is `traceable` per
+    "row" or only as a "cohort". That is the provenance of the numbers, not padding:
+    quote `_source_url` when the user asks where a figure came from, and for anything
+    you are about to publish — or the moment they ask for the filing, the quote, or
+    "how do you know" — pass `sources.relations[].relation` plus each row's grain
+    values to `trace_data_sources`, which resolves them to the source document, the
+    section, or the verified quote behind the number. `get_document_section` then opens
+    the exact speaker turn a transcript citation points at.
+
     HTTP 403 means the token is invalid or tampered — do not retry with an altered
     token; re-fetch the event web for a fresh link instead.
 
@@ -1489,6 +1511,211 @@ async def get_signed_sql_drilldown(
     if prompt and prompt.strip():
         params["prompt"] = prompt.strip()
     return await _send(ctx, "GET", "/query-data", params=params)
+
+
+_KEYS_ERROR = ('`keys` must be a JSON array of row objects carrying that relation\'s GRAIN '
+               'columns — e.g. [{"symbol": "SNOW", "cik": "0001273087", "date": "2026-06-30"}]. '
+               'The grain is named in the result\'s `sources.relations[].grain`.')
+
+
+def _trace_keys(keys: Any) -> tuple[Optional[str], Optional[str]]:
+    """Normalise `keys` to the JSON array of grain objects /trace-sources expects.
+
+    Returns (serialized keys, error message). A single row object is accepted and
+    wrapped; a client that already serialized the array is passed through once it
+    parses back to a list of objects. Nothing here is SQL — every value is a grain
+    column read off a row this server already returned.
+    """
+    if keys in (None, "", [], {}):
+        return None, None
+
+    payload: Any = keys
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            return None, _KEYS_ERROR
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list) or not all(isinstance(k, dict) for k in payload):
+        return None, _KEYS_ERROR
+    if not payload:
+        return None, None
+
+    encoded = json.dumps(payload, default=str)
+    if len(encoded) > 20_000:
+        return None, (f"`keys` is too large ({len(encoded)} chars; the backend limit is 20,000). "
+                      "Trace the rows you are actually going to cite — a few dozen — rather "
+                      "than the whole result set.")
+    return encoded, None
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Trace Numbers To Their Sources", readOnlyHint=True))
+async def trace_data_sources(
+    ctx: Context,
+    relation: Optional[str] = None,
+    keys: Optional[list[dict]] = None,
+    column: Optional[str] = None,
+    encrypted_query_token: Optional[str] = None,
+    prompt: Optional[str] = None,
+    values: Optional[dict] = None,
+    max_documents: Optional[int] = None,
+    resolve_passages: bool = False,
+) -> Any:
+    """Resolve numbers you are holding back to the documents they were read from — the filing, the section, or the verified quote.
+
+    The CITATION rung of the chain. `explore_data_catalogue`, `run_saved_query` and
+    `get_signed_sql_drilldown` hand back rows; this says where each number CAME FROM.
+    Reach for it whenever the user asks "where does that come from", "which filing",
+    "can you cite that", "how do you know" — and unprompted before you publish a figure
+    they are going to act on.
+
+    TWO WAYS IN, and the FIRST is preferred:
+      1. `relation` + `keys` — `relation` is a name off the result's
+         `sources.relations[].relation`; `keys` is one JSON object per row you want
+         traced, carrying that relation's grain values, e.g.
+         [{"symbol": "SNOW", "cik": "0001273087", "date": "2026-06-30"}]. The grain is
+         named in `sources.relations[].grain`. No token and no SQL, so this is the form
+         that works when you assembled a table across several calls (`run_saved_query`
+         issues one call per saved token, so a token only ever describes a fragment of
+         what you ended up with) or filtered the rows yourself. Trace the rows you will
+         actually cite — a few dozen — not the whole result set.
+      2. `encrypted_query_token` — a `trace_token` from a `sources` block, or the
+         original `query_token` / `signed_query_url`, for the "I have a link and
+         nothing else" case. The URL form is unwrapped automatically. Tokens are minted
+         server-side only: never construct, guess or edit one, and never pass SQL here.
+
+    THREE CITATION GRAINS come back, finest first. Which one answers depends on the
+    relation and you do not choose it — one surface over several stacks:
+      - `citations` carrying `quotes` — the passages an analysis row was actually
+        WRITTEN from, with quotes machine-verified against the section text. The
+        strongest evidence in the system; quote these verbatim.
+      - `citations` of kind `transcript_section` — a link to ONE numbered speaker turn
+        of an earnings call. `get_document_section` fetches that turn's text.
+      - `documents` — the whole source document (SEC 13F / Form 4 / 8-K / 10-Q / 10-K,
+        an earnings-call transcript, an IR PDF) a number was read from. The fallback,
+        and available wherever lineage reaches a document at all.
+    `providers` names which of those answered, and every relation's traceability is
+    derived from the live data model — a redefined view re-derives its own on the next
+    refresh, so trust this response over anything remembered.
+
+    READ `traceable` BEFORE YOU WRITE. "row" means each row maps to one document and
+    may be cited that way. "cohort" means the number is a sum over a SET of filings:
+    the response carries `cohort` instead of `documents`, only the set can honestly be
+    cited, and writing "per this filing, hedge funds own 4.1%" off a cohort row is the
+    exact failure this field exists to prevent. "none" means the lineage reaches no
+    document — say the number cannot be sourced rather than reaching for a plausible
+    filing. A `reason` of "no_keys" means the keys you passed did not match the grain,
+    not that the number is unsourced; re-read `grain` and pass those columns.
+
+    `column` traces ONE column instead of the whole row — necessary for a YoY or
+    change relation, where each value column resolves to a DIFFERENT filing (the
+    result's `sources.relations[].per_column` says which columns work this way).
+
+    `resolve_passages=True` also fetches the passage TEXT behind each citation (the
+    speaker turn, or the filing section from the reader) instead of just a link. It
+    costs a fetch and is capped at 20 passages, so ask for it when you intend to quote,
+    not by reflex — a link is already a citation. Applies to the `relation` + `keys`
+    form.
+
+    `max_documents` caps the documents returned (server default 50, max 500).
+    `values` and `prompt` apply to the TOKEN form only, and only for a token that is a
+    placeholder twin: `values` is a JSON object of {slot name: typed value} that
+    re-aims it deterministically, `prompt` fills from wording what `values` did not.
+    Neither can change WHICH documents come back for a given set of rows.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically). A 403 means
+    the token is invalid or tampered — re-fetch the link rather than retrying an altered
+    one; a 422 means neither `relation`+`keys` nor `t` arrived in a usable form.
+    """
+    token = _query_token(encrypted_query_token) if encrypted_query_token else None
+    if not relation and not token:
+        return {"error": "Pass either `relation` + `keys` (preferred — take both from the "
+                         "result's `sources` block), or `encrypted_query_token`."}
+
+    params: dict[str, Any] = {}
+    if relation:
+        params["relation"] = relation.strip()
+        encoded, err = _trace_keys(keys)
+        if err:
+            return {"error": err}
+        if encoded:
+            params["keys"] = encoded
+        if column and column.strip():
+            params["column"] = column.strip()
+        if resolve_passages:
+            params["resolve_passages"] = True
+    if token:
+        params["t"] = token
+        extra, err = _replay_args(values)
+        if err:
+            return {"error": err}
+        params.update(extra)
+    if prompt and prompt.strip():
+        params["prompt"] = prompt.strip()
+    if max_documents is not None:
+        try:
+            cap = int(max_documents)
+        except (TypeError, ValueError):
+            return {"error": "`max_documents` must be an integer between 1 and 500, e.g. 50."}
+        if not 1 <= cap <= 500:
+            return {"error": "`max_documents` must be between 1 and 500, e.g. 50."}
+        params["max_documents"] = cap
+
+    return await _send(ctx, "GET", "/trace-sources", params=params)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Get Source Document Section", readOnlyHint=True))
+async def get_document_section(
+    ctx: Context,
+    symbol: str,
+    year: int,
+    quarter: int,
+    n: int,
+    name: str = "earnings_transcript",
+) -> Any:
+    """Open ONE numbered section of a source document — the exact earnings-call speaker turn a citation points at.
+
+    The other end of a `trace_data_sources` citation, and the finest grain the platform
+    serves: not the whole call, one turn of it. Use it to read the passage behind a
+    number before quoting it, and to quote a speaker verbatim with the citation intact.
+
+    Every argument comes off the citation you are following — a `transcript_section`
+    citation's URL is `/query-section?name=...&symbol=...&year=...&quarter=...&n=...`,
+    so read the four values out of it rather than deriving them. If you pulled the row
+    from `earnings_call_transcript_sections` yourself you already hold all four
+    (`symbol`, `year`, `quarter`, `section_no`); no text search is needed or wanted.
+
+    *** `year` and `quarter` are the FISCAL period of the CALL, never the calendar
+    quarter a report covers. *** For most covered companies those differ — the call
+    everyone calls "Q2 2026" is stored as FY2026 Q4 for one name and FY2027 Q1 for
+    another. Take the period from the citation, the transcript record, or `call_date`.
+    A 404 here ("no section N for SYM YEARqQ") is almost always this, not a missing
+    call: re-check the period before concluding the transcript is not covered.
+
+    `name` is the whitelisted section source; `earnings_transcript` (the default) is
+    the one that exists today. `n` is 1-based within the document.
+
+    Returns {"name", "symbol", "year", "quarter", "n", "format": "paragraph",
+    "count", "rows": [{symbol, year, quarter, call_date, section_no, speaker,
+    content}], "highlights": [...], "total_sections": N, "transcript_url": ...}.
+    `content` is the turn's text and `speaker` is who said it — attribute the quote to
+    that speaker, never to "the company". `total_sections` bounds `n`, so neighbouring
+    turns (n-1, n+1) are how you read a passage in context when it starts mid-answer.
+    `highlights` are quotes the platform's own analysis pipeline verified against this
+    section; they mark evidence inside it but are NOT necessarily the passage you are
+    citing — verify your own quote against `content`. `transcript_url` is frequently
+    null, so offer "view the full call" only when it is present.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    """
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        return {"error": "`symbol` is required — the ticker the cited call belongs to."}
+    return await _send(ctx, "GET", "/query-section", params={
+        "name": (name or "earnings_transcript").strip(),
+        "symbol": symbol, "year": year, "quarter": quarter, "n": n,
+    })
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Save Data Request For Replay", readOnlyHint=False, destructiveHint=False))
@@ -1695,6 +1922,17 @@ async def run_saved_query(
     which were ignored. Rows only — the underlying SQL is never returned, by design.
     Describe the results from the row's `metadata.summary`, the substituted
     parameters, and the columns, never by asserting what the query does internally.
+
+    CITE WHAT YOU PUBLISH: each entry in `results` may carry `_source_*` columns —
+    `_source_url`, `_source_filed_at`, `_source_document_id`, `_source_citations` —
+    alongside a `sources` block naming each relation, its grain, and whether it is
+    `traceable` per "row" or only as a "cohort". That is the provenance of the numbers,
+    not padding: quote `_source_url` when the user asks where a figure came from, and for anything
+    you are about to publish — or the moment they ask for the filing, the quote, or
+    "how do you know" — pass `sources.relations[].relation` plus each row's grain
+    values to `trace_data_sources`, which resolves them to the source document, the
+    section, or the verified quote behind the number. `get_document_section` then opens
+    the exact speaker turn a transcript citation points at.
 
     Each token runs independently: one failure does not stop the rest, and that entry
     carries an "error" key instead of rows. A 403 means that token is invalid or
