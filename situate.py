@@ -19,9 +19,9 @@ Design notes (from the 2026-09-10 investor-deck outage):
   covers the whole corpus), not from a family regex. "Most significant investor decks
   today" used to miss every family, default to earnings, and plan ir_publication fourth.
 - There is no default family. A question that names nothing is a market-wide sweep.
-- ``explore_data_catalogue`` is never planned in universe scope: the cache IS "today",
-  and an unscoped explore over ``ir_documents`` was a 127 MB result that OOM-killed the
-  proxy. It is on the skip list with the conditions under which it is allowed.
+- ``explore_data_catalogue`` is never a plan step in ANY scope: the cache IS "today", and
+  an unscoped explore over ``ir_documents`` was a 127 MB result that OOM-killed the proxy.
+  It lives in ``suggest[]`` with the ``when`` under which the agent may reach for it.
 """
 from __future__ import annotations
 
@@ -300,6 +300,19 @@ def _skip(tool: str, args: Optional[dict[str, Any]], why: str) -> dict[str, Any]
     return d
 
 
+def _suggest(tool: str, args: Optional[dict[str, Any]], when: str, why: str, *,
+             reads: Optional[list[str]] = None) -> dict[str, Any]:
+    """A call to make ONLY if `when` arises after the plan has run. Never a plan step:
+    explore_data_catalogue is a multi-minute job whose unscoped form returned 127 MB and
+    took the proxy down on 2026-09-10 — the agent decides to dispatch it, situate never does."""
+    reg = TOOL_REGISTRY.get(tool, {"auth": "required", "sync": True})
+    d: dict[str, Any] = {"tool": tool, "args": args or {}, "when": when, "why": why,
+                         "auth": reg["auth"], "sync": reg["sync"], "_category": "suggest"}
+    if reads:
+        d["reads"] = reads
+    return d
+
+
 # ------------------------------------------------------------------ symbol scope
 def situate_symbol(
     symbol: str,
@@ -336,13 +349,16 @@ def situate_symbol(
         plan.append(_step("context", "get_company_snapshot", {"symbol": symbol},
                           "no event-web rows in the window — the snapshot is the only cheap grounding",
                           provenance="declared"))
-        plan.append(_step("explore", "explore_data_catalogue",
-                          {"query": f"For {symbol}: the most recent 30 days of material_update_events and "
-                                    f"significant_news_symbol_history, newest first"},
-                          "durable fallback when the graph is empty — NOT evidence nothing happened",
-                          provenance="declared", reads=["material_update_events", "significant_news_symbol_history"]))
+        plan.append(_suggest("explore_data_catalogue",
+                             {"query": f"For {symbol}: the most recent 30 days of material_update_events and "
+                                       f"significant_news_symbol_history, newest first"},
+                             when="the snapshot does not explain the position and a wider window_days on "
+                                  "get_company_event_web is still empty",
+                             why="durable fallback when the graph is empty — NOT evidence nothing happened; "
+                                 "a multi-minute job, so only on that condition",
+                             reads=["material_update_events", "significant_news_symbol_history"]))
         guidance.append(f"{symbol}: the event web has no rows in the window (or errored: {err}). "
-                        "That is not evidence nothing happened — widen window_days or read the durable tables.")
+                        "That is not evidence nothing happened — widen window_days first; the durable tables are in suggest[].")
         return block, plan, skip, guidance
 
     nodes: list[dict[str, Any]] = web["nodes"]
@@ -519,8 +535,11 @@ def situate_symbol(
             plan.append(_step("payload", "get_signed_sql_drilldown", {"encrypted_query_token": query_token(signed)},
                               f"{t} payload (web {n['id']}). Aged out of the {ttl_hours}h cache; durable copy is "
                               f"{persisted} — this signed drilldown returns the row with zero planning",
-                              provenance="mined", reads=[persisted],
-                              fallback={"tool": "explore_data_catalogue", "args": explore_args}))
+                              provenance="mined", reads=[persisted]))
+            plan.append(_suggest("explore_data_catalogue", explore_args,
+                                 when=f"the {t} drilldown above returned not-authenticated or errored",
+                                 why=f"same {persisted} rows, planned from scratch — slower, so only if the drilldown fails",
+                                 reads=[persisted]))
         elif persisted:
             explore_payloads.append((t, n, persisted))
     for t in expired:
@@ -569,11 +588,16 @@ def situate_symbol(
         explore_reads.append("eod_stock_prices")
     if parts and (primary or explore_payloads):
         q = f"For {symbol}: " + "; ".join(parts)
-        plan.append(_step("explore", "explore_data_catalogue", {"query": q},
-                          "ONE combined async job for everything durable: expired payloads plus the relations "
-                          f"entailed by {primary['type'] if primary else 'the window'} that have refreshed since it "
-                          "(stale ones are in guidance, not here). Poll its single task_id with get_task_status",
-                          provenance="pg_depend", reads=explore_reads))
+        expired_payloads = [t for t, _, _ in explore_payloads]
+        plan.append(_suggest("explore_data_catalogue", {"query": q},
+                             when=("the user wants the payload of " + ", ".join(expired_payloads) +
+                                   " (aged out of the cache with no signed drilldown)" if expired_payloads else
+                                   "the user wants the underlying rows")
+                                  + " or the daily tape — not for a catch-up answer the plan already covers",
+                             why="ONE combined async job for everything durable: expired payloads plus the relations "
+                                 f"entailed by {primary['type'] if primary else 'the window'} that have refreshed since it. "
+                                 "Multi-minute; poll its single task_id with get_task_status",
+                             reads=explore_reads))
 
     # ---- plan: context ------------------------------------------------------------------
     snap_at = observed.get("company_snapshot")
@@ -652,9 +676,10 @@ def situate_universe(
       3. It names neither — a market-wide SWEEP: one call per episode entry point across
          the whole realtime corpus (earnings, news, movers, 13F). There is NO default
          family; guessing "earnings" for "what's going on?" answered a different question.
-    explore_data_catalogue is never planned here and is put on the skip list: the realtime
-    cache IS "today", and an unscoped explore over a persisted relation is a multi-minute
-    job over the whole table (the 2026-09-10 outage was a 127 MB result from exactly that).
+    explore_data_catalogue is never a plan step; it is a suggest[] entry whose `when` is
+    "the user asks for more than the cache holds": the realtime cache IS "today", and an
+    unscoped explore over a persisted relation is a multi-minute job over the whole table
+    (the 2026-09-10 outage was a 127 MB result from exactly that).
     `corpus` (list_options("event_types") rows) is echoed in the block so the agent can see
     every type it could ask for without a second enumeration call.
     """
@@ -720,13 +745,18 @@ def situate_universe(
         plan.append(_step("reaction", "list_realtime_events", {"event_type": "biggest_mover"},
                           "market is open — confirmed movers off 30-minute bars", provenance="declared", optional=True))
 
-    persisted_asked = [f"{t} -> {cards[t]['persisted_in']}" for t in asked if (cards.get(t) or {}).get("persisted_in")]
-    skip.append(_skip("explore_data_catalogue", None,
-                      f"not for a 'today' / 'right now' question: the {ttl_hours}h realtime cache IS today. An unscoped "
-                      "explore over a persisted relation is a multi-minute job that returns the whole table. Only if the "
-                      f"user asks for MORE than {ttl_hours}h of history: one explore, scoped to ONE relation, an explicit "
-                      "date window, and tickers=[...] from the realtime results"
-                      + (f" ({'; '.join(persisted_asked)})." if persisted_asked else ".")))
+    lead = order[0] if order else None
+    persisted = (cards.get(lead) or {}).get("persisted_in") if lead else None
+    relation = persisted or "<the card's persisted_in relation>"
+    plan.append(_suggest("explore_data_catalogue",
+                         {"query": f"For <tickers from the realtime results>: rows of {relation} "
+                                   "between <start date> and <end date>, newest first"},
+                         when=f"the user asks for MORE than the {ttl_hours}h the realtime cache holds — never for a "
+                              "'today' / 'right now' question, and never because a list came back empty",
+                         why="the durable copy of what the cache aged out. An UNSCOPED explore over a persisted relation "
+                             "returns the whole table (thousands of rows, minutes); scope it to ONE relation, an explicit "
+                             "date window and tickers=[...]",
+                         reads=[persisted] if persisted else None))
     skip.append(_skip("generate_research_report", None, "~10-12 minute job; not for a what-is-going-on question"))
 
     if asked:
@@ -737,7 +767,7 @@ def situate_universe(
         guidance.append(f"Chain from the first non-empty result: narrow every follow-up with tickers=[...] to the symbols "
                         f"just seen. Order: {' -> '.join(order[:UNIVERSE_PAYLOAD_CAP])}.")
     guidance.append(f"An empty list means the {ttl_hours}h cache is cold for that type — say so. It is not evidence nothing "
-                    "happened, and it is not a reason to dispatch explore_data_catalogue (see skip).")
+                    "happened, and it is not a reason to dispatch explore_data_catalogue (see suggest[] for when it is).")
     gaps = unmapped_event_types(cards) if cards else []
     if gaps:
         guidance.append(f"routing gap: the ontology has realtime types situate cannot match by keyword yet "
@@ -775,6 +805,10 @@ def compose(
     # dedupe on (tool, args), order by category then optional, cap, number.
     seen: set[str] = set()
     ordered: list[dict[str, Any]] = []
+    suggest = [dict(s, **{}) for s in plan if s.get("_category") == "suggest"]
+    for s in suggest:
+        s.pop("_category", None)
+    plan = [s for s in plan if s.get("_category") != "suggest"]
     for s in sorted(plan, key=lambda s: (s["optional"], _CATEGORY_ORDER.get(s["_category"], 9))):
         key = s["tool"] + json.dumps(s["args"], sort_keys=True)
         if key in seen:
@@ -808,5 +842,6 @@ def compose(
         out["symbols"] = symbol_blocks
     out["plan"] = ordered
     out["skip"] = uniq_skip
+    out["suggest"] = suggest
     out["guidance"] = degraded_notes + guidance
     return out

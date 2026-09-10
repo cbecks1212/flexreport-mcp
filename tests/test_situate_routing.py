@@ -74,7 +74,14 @@ def _universe(question: str, market=CLOSED):
     types = situate.question_event_types(question, CARDS)
     fam = situate.question_family(question, types, CARDS)
     block, plan, skip, guidance = situate.situate_universe(fam, CARDS, EPISODES, market, NOW, types, 12, CORPUS)
-    return types, fam, block, plan, skip, guidance
+    out = situate.compose("universe", market, 12, NOW, {}, block, plan, skip, guidance, [], None)
+    return types, fam, block, out["plan"], out["skip"], out["guidance"], out["suggest"]
+
+
+def _compose_symbol(symbol, web, question, question_fam="earnings"):
+    types = situate.question_event_types(question, CARDS)
+    block, plan, skip, guidance = situate.situate_symbol(symbol, web, CARDS, {}, EPISODES, 12, CLOSED, NOW, question_fam, types)
+    return situate.compose("symbol", CLOSED, 12, NOW, {symbol: block}, None, plan, skip, guidance, [], None)
 
 
 def test_vocabulary_covers_the_whole_corpus():
@@ -88,7 +95,7 @@ def test_vocabulary_covers_the_whole_corpus():
 
 def test_named_types_start_the_plan():
     for q, first in NAMED_TYPE_CASES:
-        types, fam, block, plan, _, _ = _universe(q)
+        types, fam, block, plan, _, _, _ = _universe(q)
         assert types and types[0] == first, f"{q!r}: got {types}"
         assert fam == CARDS[first]["family"], f"{q!r}: family {fam}"
         assert block["shape"] == "named_types"
@@ -97,7 +104,7 @@ def test_named_types_start_the_plan():
 
 
 def test_deck_question_rotates_the_earnings_episode():
-    _, _, block, plan, _, guidance = _universe(NAMED_TYPE_CASES[0][0])
+    _, _, block, plan, _, guidance, _ = _universe(NAMED_TYPE_CASES[0][0])
     order = block["order"]
     assert order[0] == "ir_publication"
     # rest of the earnings episode follows AFTER ir_publication, wrapping round
@@ -111,7 +118,7 @@ def test_deck_question_rotates_the_earnings_episode():
 
 def test_family_only_questions_walk_the_episode():
     for q, family in FAMILY_ONLY_CASES:
-        types, fam, block, plan, _, _ = _universe(q)
+        types, fam, block, plan, _, _, _ = _universe(q)
         assert types == [], (q, types)
         assert fam == family, (q, fam)
         assert block["shape"] == "family", (q, block["shape"])
@@ -120,7 +127,7 @@ def test_family_only_questions_walk_the_episode():
 
 def test_no_match_is_a_sweep_not_earnings():
     for q in NO_MATCH_CASES:
-        types, fam, block, plan, _, guidance = _universe(q)
+        types, fam, block, plan, _, guidance, _ = _universe(q)
         assert types == [] and fam is None, (q, types, fam)
         assert block["shape"] == "sweep"
         planned = [s["args"]["event_type"] for s in plan if s["tool"] == "list_realtime_events"]
@@ -136,19 +143,38 @@ def test_question_family_never_defaults():
     assert situate.question_family("what's going on?") is None
 
 
-def test_explore_is_skipped_never_planned():
-    for q, _ in NAMED_TYPE_CASES + FAMILY_ONLY_CASES:
-        _, _, _, plan, skip, guidance = _universe(q)
+def test_explore_is_a_suggestion_never_a_plan_step():
+    for q, _ in NAMED_TYPE_CASES + FAMILY_ONLY_CASES + [(q, None) for q in NO_MATCH_CASES]:
+        _, _, _, plan, skip, guidance, suggest = _universe(q)
         assert all(s["tool"] != "explore_data_catalogue" for s in plan), q
-        assert any(k["tool"] == "explore_data_catalogue" for k in skip), q
+        assert all(k["tool"] != "explore_data_catalogue" for k in skip), q
+        ex = [s for s in suggest if s["tool"] == "explore_data_catalogue"]
+        assert len(ex) == 1 and "MORE than the 12h" in ex[0]["when"], (q, ex)
+        assert "step" not in ex[0] and ex[0]["sync"] is False
         assert not any("with explore_data_catalogue for anything older" in g for g in guidance), q
-    _, _, _, _, skip, _ = _universe(NAMED_TYPE_CASES[0][0])
-    why = next(k["why"] for k in skip if k["tool"] == "explore_data_catalogue")
-    assert "ir_publication -> ir_documents" in why
+    _, _, _, _, _, _, suggest = _universe(NAMED_TYPE_CASES[0][0])
+    ex = next(s for s in suggest if s["tool"] == "explore_data_catalogue")
+    assert "ir_documents" in ex["args"]["query"] and ex["reads"] == ["ir_documents"]
+
+
+def test_symbol_scope_explore_is_a_suggestion_too():
+    web = {"as_of": "2026-09-10T14:00:00Z", "window_days": 7, "edges": [], "nodes": [
+        {"id": "n1", "kind": "event", "type": "ir_publication", "at": "2026-09-02T12:00:00Z", "headline": "deck"},  # aged out
+        {"id": "n2", "kind": "event", "type": "eps_update", "at": "2026-09-10T12:30:00Z", "headline": "beat"},
+    ]}
+    out = _compose_symbol("OKTA", web, "OKTA's deck")
+    assert all(s["tool"] != "explore_data_catalogue" for s in out["plan"])
+    ex = [s for s in out["suggest"] if s["tool"] == "explore_data_catalogue"]
+    assert ex and "ir_publication" in ex[0]["when"] and "ir_documents" in ex[0]["args"]["query"]
+    assert not any("fallback" in s for s in out["plan"])
+    # empty web: snapshot is planned, explore is only suggested
+    out = _compose_symbol("ZZZZ", {"nodes": [], "edges": []}, "catch me up on ZZZZ")
+    assert [s["tool"] for s in out["plan"]] == ["get_company_snapshot"]
+    assert out["suggest"][0]["tool"] == "explore_data_catalogue" and "window_days" in out["suggest"][0]["when"]
 
 
 def test_corpus_is_echoed_in_the_block():
-    _, _, block, _, _, _ = _universe("what's going on?")
+    _, _, block, _, _, _, _ = _universe("what's going on?")
     types = {r["event_type"]: r for r in block["event_types"]}
     assert set(types) == {r["event_type"] for r in CORPUS}
     assert types["ir_publication"]["family"] == "earnings"
@@ -156,7 +182,7 @@ def test_corpus_is_echoed_in_the_block():
 
 
 def test_open_market_adds_movers_once():
-    _, _, _, plan, _, _ = _universe("biggest movers right now", OPEN)
+    _, _, _, plan, _, _, _ = _universe("biggest movers right now", OPEN)
     movers = [s for s in plan if s["args"] == {"event_type": "biggest_mover"}]
     assert len(movers) == 1 and movers[0]["optional"] is False
 
@@ -170,7 +196,7 @@ def test_unknown_types_are_dropped_against_the_ontology():
 def test_multiple_named_types_keep_user_order():
     types = situate.question_event_types("8-Ks and the decks that came with them", CARDS)
     assert types == ["8k_release", "ir_publication"]
-    _, _, block, plan, _, _ = _universe("8-Ks and the decks that came with them")
+    _, _, block, plan, _, _, _ = _universe("8-Ks and the decks that came with them")
     assert block["order"][:2] == ["8k_release", "ir_publication"]
 
 

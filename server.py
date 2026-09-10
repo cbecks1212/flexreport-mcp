@@ -256,14 +256,19 @@ async def situate(
                       are valid for it — pass them through unchanged.
       skip[]          calls that would return nothing or waste a job (an event type
                       that aged out of the cache, a 10-minute report) — DO NOT make these.
+      suggest[]       calls to make ONLY IF their `when` arises after the plan has run
+                      (explore_data_catalogue lives here, never in plan[]: it is a
+                      multi-minute job, and "the user wants more than the 12h cache
+                      holds" is the situation that earns it).
       guidance[]      situation-scoped rules: which tables have NOT refreshed since the
                       event, which followers are overdue, filer-scoped 13F nodes.
 
     HOW TO EXECUTE:
       1. Run plan[] in order. `sync=false` steps return a task_id — poll
-         get_task_status. If a step errors (e.g. drilldown not-authenticated), use its
-         `fallback`.
+         get_task_status.
       2. Never make a call that appears in skip[]; quote its `why` if the user asks.
+         Make a suggest[] call only when its `when` is true — an empty realtime list
+         is NOT that condition; say the cache is cold instead.
       3. Read guidance[] before writing: an "overdue" follower is "not recorded yet",
          not "did not happen"; a relation with reflects_newest_event=false shows the
          PRIOR period, never the reaction.
