@@ -17,6 +17,12 @@ Add the connector to Claude Code
 claude mcp add --transport http flexreport https://mcp.flexreportfinapi.com/mcp
 ```
 
+Or add to Codex
+
+```bash
+codex mcp add flexreport --url https://mcp.flexreportfinapi.com/mcp
+```
+
 Then start Claude and just ask (e.g. *"pull the biggest movers from flexreport"*).
 On the first data call your MCP client runs an OAuth sign-in in your browser —
 sign in or register when prompted; you never paste a token. Add `--scope user` to
