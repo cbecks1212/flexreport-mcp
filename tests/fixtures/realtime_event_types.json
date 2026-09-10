@@ -1,0 +1,102 @@
+[
+ {
+  "event_type": "eps_update",
+  "family": "earnings",
+  "description": "Intraday earnings tracker update for a company that just reported \u2014 beat/miss summary with supporting news sources. One slice of the earnings family, not a stand-in for it."
+ },
+ {
+  "event_type": "eps_release",
+  "family": "earnings",
+  "description": "A company's earnings results release detected on announcement day \u2014 LLM summary of the reported numbers with news sources."
+ },
+ {
+  "event_type": "financials_release",
+  "family": "earnings",
+  "description": "An earnings-family update tied to a new 10-Q release. Provides a fully updated snapshot of the company along with an updated PDF report."
+ },
+ {
+  "event_type": "transcript_update",
+  "family": "earnings",
+  "description": "A new earnings-call transcript has been analyzed and saved to transcript_timeseries_analysis \u2014 payload carries thesis deltas (added/removed/strengthened/weakened) and the guidance outlook."
+ },
+ {
+  "event_type": "8k_release",
+  "family": "earnings",
+  "description": "Analysis of an earnings-related 8-K filing \u2014 as-reported EDGAR financials with key takeaways, flags, a recommendation, and links to the SEC filing."
+ },
+ {
+  "event_type": "ir_publication",
+  "family": "earnings",
+  "description": "Analysis of a new investor-relations publication (earnings deck / presentation) scraped from the company's own IR site \u2014 summary, verbatim reported metrics, guidance commentary, flags, and a link to the source document."
+ },
+ {
+  "event_type": "earnings_themes",
+  "family": "earnings",
+  "description": "Cross-company thematic synthesis of the current earnings season \u2014 emerging, fading, and reinforced themes across recent reporters."
+ },
+ {
+  "event_type": "news_evolution",
+  "family": "news",
+  "description": "Market-wide news-flow synthesis \u2014 emerging, fading, and reinforced themes plus macro risks and sector implications. A single latest snapshot rather than per-symbol events."
+ },
+ {
+  "event_type": "company_update",
+  "family": "news",
+  "description": "Material breaking-news update on a company from the news-significance workflow \u2014 thesis-relevant developments outside the scheduled earnings cycle."
+ },
+ {
+  "event_type": "biggest_gainer",
+  "family": "market_movement",
+  "description": "Top intraday percentage gainers among covered symbols."
+ },
+ {
+  "event_type": "biggest_mover",
+  "family": "market_movement",
+  "description": "Largest absolute intraday movers (either direction) among covered symbols."
+ },
+ {
+  "event_type": "biggest_loser",
+  "family": "market_movement",
+  "description": "Largest intraday decliners among covered symbols."
+ },
+ {
+  "event_type": "13f_significant_position_change",
+  "family": "institutional_ownership",
+  "description": "Significant institutional position changes detected in newly filed 13Fs for covered symbols."
+ },
+ {
+  "event_type": "13f_new",
+  "family": "institutional_ownership",
+  "description": "Positions a specific 13F filer opened for the FIRST time in its latest filing \u2014 keyed by filer CIK rather than stock symbol."
+ },
+ {
+  "event_type": "13f_exited",
+  "family": "institutional_ownership",
+  "description": "Positions a specific 13F filer closed out COMPLETELY in its latest filing \u2014 keyed by filer CIK rather than stock symbol. `data` carries the prior-quarter size of the stake that was sold."
+ },
+ {
+  "event_type": "realtime_ratings_update",
+  "family": "analyst_activity",
+  "description": "New sell-side analyst rating actions \u2014 upgrades, downgrades, initiations, and price-target changes."
+ },
+ {
+  "event_type": "financial_estimate_update",
+  "family": "analyst_activity",
+  "description": "Changes in consensus analyst estimates for upcoming reporting periods."
+ },
+ {
+  "event_type": "strategy_update",
+  "family": "strategy",
+  "description": "Strategy portfolio updates (SMID / momentum / multi-signal) including intraday ADD/REMOVE changes in the intraday_changes array."
+ },
+ {
+  "event_type": "llm_basket_update",
+  "family": "strategy",
+  "description": "Updates to LLM-curated thematic stock baskets \u2014 holdings changes and the basket rationale."
+ },
+ {
+  "event_type": "stock_return_prediction_update",
+  "family": "prediction",
+  "description": "Refreshed model-predicted stock return scores and recommendations."
+ }
+]

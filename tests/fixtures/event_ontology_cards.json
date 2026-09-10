@@ -1,0 +1,340 @@
+{
+ "as_of": "2026-09-06T08:18:53.344507+00:00",
+ "episodes": {
+  "earnings": {
+   "order": [
+    "eps_update",
+    "eps_release",
+    "8k_release",
+    "ir_publication",
+    "eps_market_reaction",
+    "transcript_update",
+    "realtime_ratings_update",
+    "financial_estimate_update",
+    "company_update",
+    "financials_release",
+    "earnings_themes"
+   ]
+  },
+  "news": {
+   "order": [
+    "company_update",
+    "news_evolution"
+   ]
+  },
+  "realtime_mover": {
+   "order": [
+    "biggest_mover",
+    "biggest_gainer",
+    "biggest_loser",
+    "stock_return_prediction_update",
+    "company_update"
+   ]
+  },
+  "thirteen_f_cycle": {
+   "order": [
+    "13f_new",
+    "13f_exited",
+    "13f_significant_position_change"
+   ]
+  }
+ },
+ "event_types": {
+  "13f_exited": {
+   "about": [
+    "filer",
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "thirteen_f_cycle",
+     "of": 3,
+     "position": 1
+    }
+   ],
+   "family": "institutional_ownership",
+   "persisted_in": "institutional_ownership_by_symbol_v"
+  },
+  "13f_new": {
+   "about": [
+    "filer",
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "thirteen_f_cycle",
+     "of": 3,
+     "position": 0
+    }
+   ],
+   "family": "institutional_ownership",
+   "persisted_in": "institutional_ownership_by_symbol_v"
+  },
+  "13f_significant_position_change": {
+   "about": [
+    "filer",
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "thirteen_f_cycle",
+     "of": 3,
+     "position": 2
+    }
+   ],
+   "family": "institutional_ownership",
+   "persisted_in": "institutional_ownership_timeseries_analysis"
+  },
+  "8k_release": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "earnings",
+     "of": 11,
+     "position": 2
+    }
+   ],
+   "family": "earnings",
+   "persisted_in": "eight_k_timeseries_analysis"
+  },
+  "biggest_gainer": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "realtime_mover",
+     "of": 5,
+     "position": 1
+    }
+   ],
+   "family": "market_movement",
+   "persisted_in": "price_timeseries_analysis"
+  },
+  "biggest_loser": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "realtime_mover",
+     "of": 5,
+     "position": 2
+    }
+   ],
+   "family": "market_movement",
+   "persisted_in": "price_timeseries_analysis"
+  },
+  "biggest_mover": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "realtime_mover",
+     "of": 5,
+     "position": 0
+    }
+   ],
+   "family": "market_movement",
+   "persisted_in": "price_timeseries_analysis"
+  },
+  "company_update": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "earnings",
+     "of": 11,
+     "position": 8
+    },
+    {
+     "name": "realtime_mover",
+     "of": 5,
+     "position": 4
+    },
+    {
+     "name": "news",
+     "of": 2,
+     "position": 0
+    }
+   ],
+   "family": "news",
+   "persisted_in": "material_update_events"
+  },
+  "earnings_themes": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "earnings",
+     "of": 11,
+     "position": 10
+    }
+   ],
+   "family": "earnings",
+   "persisted_in": "earnings_themes"
+  },
+  "eps_market_reaction": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "earnings",
+     "of": 11,
+     "position": 4
+    }
+   ],
+   "family": null,
+   "persisted_in": null
+  },
+  "eps_release": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "earnings",
+     "of": 11,
+     "position": 1
+    }
+   ],
+   "family": "earnings",
+   "persisted_in": "earnings"
+  },
+  "eps_update": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "earnings",
+     "of": 11,
+     "position": 0
+    }
+   ],
+   "family": "earnings",
+   "persisted_in": "earnings"
+  },
+  "financial_estimate_update": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "earnings",
+     "of": 11,
+     "position": 7
+    }
+   ],
+   "family": "analyst_activity",
+   "persisted_in": "analyst_estimate_timeseries_analysis"
+  },
+  "financials_release": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "earnings",
+     "of": 11,
+     "position": 9
+    }
+   ],
+   "family": "earnings",
+   "persisted_in": "financial_timeseries_analysis"
+  },
+  "ir_publication": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "earnings",
+     "of": 11,
+     "position": 3
+    }
+   ],
+   "family": "earnings",
+   "persisted_in": "ir_documents"
+  },
+  "llm_basket_update": {
+   "about": [
+    "strategy"
+   ],
+   "episodes": [],
+   "family": "strategy",
+   "persisted_in": "llm_stock_holdings"
+  },
+  "news_evolution": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "news",
+     "of": 2,
+     "position": 1
+    }
+   ],
+   "family": "news",
+   "persisted_in": "news_evolution"
+  },
+  "realtime_ratings_update": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "earnings",
+     "of": 11,
+     "position": 6
+    }
+   ],
+   "family": "analyst_activity",
+   "persisted_in": "analyst_ratings"
+  },
+  "stock_return_prediction_update": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "realtime_mover",
+     "of": 5,
+     "position": 3
+    }
+   ],
+   "family": "prediction",
+   "persisted_in": "stock_return_predictions"
+  },
+  "strategy_update": {
+   "about": [
+    "strategy"
+   ],
+   "episodes": [],
+   "family": "strategy",
+   "persisted_in": "strategy_holdings"
+  },
+  "transcript_update": {
+   "about": [
+    "symbol"
+   ],
+   "episodes": [
+    {
+     "name": "earnings",
+     "of": 11,
+     "position": 5
+    }
+   ],
+   "family": "earnings",
+   "persisted_in": "transcript_timeseries_analysis"
+  }
+ },
+ "realtime_cache_ttl_hours": 12
+}

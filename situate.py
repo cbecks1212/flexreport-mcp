@@ -13,6 +13,15 @@ Design notes (from the 2026-08-30 OKTA A/B):
 - The dominant episode is chosen by how many of its members are present in the window,
   not by the newest node: on OKTA the newest node was a tiny filer's ``13f_exited`` while
   eight earnings-episode members sat behind it.
+
+Design notes (from the 2026-09-10 investor-deck outage):
+- Routing starts from the realtime event TYPE the question names (``EVENT_VOCABULARY``
+  covers the whole corpus), not from a family regex. "Most significant investor decks
+  today" used to miss every family, default to earnings, and plan ir_publication fourth.
+- There is no default family. A question that names nothing is a market-wide sweep.
+- ``explore_data_catalogue`` is never planned in universe scope: the cache IS "today",
+  and an unscoped explore over ``ir_documents`` was a 127 MB result that OOM-killed the
+  proxy. It is on the skip list with the conditions under which it is allowed.
 """
 from __future__ import annotations
 
@@ -48,15 +57,84 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "generate_research_report": {"auth": "required", "sync": False},
 }
 
-# Deterministic question -> family. Order matters (first match wins).
+# ------------------------------------------------------------ question routing
+# The realtime-event corpus: EVERY event type `list_realtime_events` can return, keyed by
+# type, with the words a user reaches for when they mean it. A question that names a type
+# ("investor decks today") starts the plan AT that type instead of walking an episode from
+# position one. Ordered most-specific first so "13F filings" lands on the 13F types before
+# "filings" could land on 8k_release. Kept in step with the live ontology by
+# `unmapped_event_types` (situate reports any type the ontology knows and this table does
+# not) and by tests/test_situate_routing.py (fails when the corpus grows).
+EVENT_VOCABULARY: dict[str, tuple[str, ...]] = {
+    "13f_new": (r"new (?:13-?f )?(?:positions?|stakes?|buys?|holdings?)", r"(?:opened|initiated|started) (?:a |new )?(?:positions?|stakes?)",
+                r"(?:positions?|stakes?) (?:opened|initiated|started)", r"first[- ]time (?:positions?|buyers?|holders?)"),
+    "13f_exited": (r"exit(?:ed|s)?\b", r"closed[- ]out", r"sold out", r"liquidat\w*", r"dumped", r"dropped (?:positions?|stakes?)"),
+    "13f_significant_position_change": (r"13-?fs?\b", r"hedge funds?", r"institution\w*", r"holders?\b",
+                                        r"(?:position|stake|holding) (?:changes?|shifts?|moves?)",
+                                        r"(?:added to|trimmed|increased|reduced|cut) (?:their |its |a )?(?:positions?|stakes?)",
+                                        r"whales?", r"smart money"),
+    "ir_publication": (r"decks?\b", r"slides?\b", r"slide ?decks?", r"presentations?", r"investor[- ]relations", r"\bir\b",
+                       r"investor (?:day|update|materials?|docs?|documents?|events?)", r"earnings materials?"),
+    "8k_release": (r"8-?ks?\b", r"eight[- ]ks?\b", r"sec filings?", r"edgar\b", r"form 8"),
+    "transcript_update": (r"transcripts?", r"earnings calls?", r"conference calls?", r"(?:call|management) commentary",
+                          r"q ?& ?a", r"prepared remarks", r"what (?:did )?management (?:say|said)"),
+    "financials_release": (r"10-?qs?\b", r"10-?ks?\b", r"quarterly financials", r"financial statements?", r"as[- ]reported",
+                           r"balance sheets?", r"cash ?flow statements?", r"income statements?"),
+    "earnings_themes": (r"earnings themes?", r"earnings[- ]season themes?", r"themes? (?:this|across|of the) (?:earnings )?season",
+                        r"(?:emerging|fading|reinforced) themes?"),
+    "eps_release": (r"earnings releases?", r"results? releases?", r"who (?:reported|is reporting|reports)", r"reporters?\b",
+                    r"reported (?:earnings|results|this morning|tonight|today)"),
+    "eps_update": (r"beats?\b", r"beat[- ]and[- ]raise", r"miss(?:es|ed)?\b", r"beat/miss", r"earnings tracker", r"how did .+ (?:do|report)",
+                   r"earnings surprises?"),
+    "news_evolution": (r"news ?flow", r"macro risks?", r"news themes?", r"what'?s (?:in|driving) the news", r"headline (?:overview|summary)",
+                       r"market narrative", r"sector implications?"),
+    "company_update": (r"news\b", r"headlines?", r"breaking", r"material (?:updates?|events?|developments?)", r"announce\w*",
+                       r"press releases?", r"what happened (?:to|with|at)"),
+    "biggest_gainer": (r"gainers?", r"winners?", r"(?:top|best) performers?", r"up the most", r"rall(?:y|ied|ying)\b", r"biggest ups?",
+                       r"(?:ripping|surging|soaring|spiking)"),
+    "biggest_loser": (r"losers?", r"decliners?", r"laggards?", r"down the most", r"sell[- ]?offs?", r"worst performers?",
+                      r"(?:tanking|crashing|plunging|dumping|getting (?:hit|crushed))"),
+    "biggest_mover": (r"movers?", r"moving\b", r"biggest moves?", r"volatil\w*", r"tape\b", r"intraday", r"why is (?:it|\w+) (?:up|down)",
+                      r"(?:trading|acting) (?:today|now)", r"most active"),
+    "realtime_ratings_update": (r"ratings?\b", r"upgrades?", r"downgrades?", r"initiations?", r"initiated coverage", r"price targets?",
+                                r"\bpts?\b", r"analyst (?:actions?|calls?|moves?|notes?|changes?)", r"sell[- ]side", r"rated\b",
+                                r"analysts?\b", r"targets?\b"),
+    "financial_estimate_update": (r"estimates?", r"consensus", r"revisions?", r"revised (?:up|down|higher|lower)",
+                                  r"numbers? (?:went|going|moved|moving) (?:up|down)", r"street numbers?"),
+    "strategy_update": (r"strateg(?:y|ies)\b", r"\bsmid\b", r"momentum", r"multi[- ]signal", r"portfolio (?:changes?|updates?|adds?|removes?|moves?)",
+                        r"adds?/removes?", r"model portfolio", r"track record"),
+    "llm_basket_update": (r"baskets?", r"thematic (?:baskets?|picks?|portfolios?)", r"llm[- ]curated"),
+    "stock_return_prediction_update": (r"predict\w*", r"predicted returns?", r"return scores?", r"model (?:scores?|picks?|recommendations?)",
+                                       r"ml (?:scores?|picks?|models?)", r"expected returns?", r"stock picks?"),
+}
+# Catch-all types that step aside when a more specific sibling in the family also matched.
+_GENERIC_YIELDS_TO: dict[str, tuple[str, ...]] = {
+    "13f_significant_position_change": ("13f_new", "13f_exited"),
+    "company_update": ("news_evolution",),
+    "biggest_mover": ("biggest_gainer", "biggest_loser"),
+}
+_EVENT_VOCABULARY_RE: dict[str, re.Pattern[str]] = {
+    t: re.compile(r"\b(?:" + "|".join(pats) + r")", re.IGNORECASE) for t, pats in EVENT_VOCABULARY.items()
+}
+
+# Deterministic question -> family for questions that name a FAMILY but no specific type
+# ("any earnings today?", "what's the market doing"). One row per ontology family that has
+# realtime cards, plus the families situate can still answer from durable tables. Order
+# matters (first match wins). A miss returns None — never a default family.
 _QUESTION_FAMILIES: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\b(13f|hedge fund|holders?|positions?|institution\w*)\b"), "institutional_ownership"),
+    (re.compile(r"\b(13f|hedge fund|holders?|positions?|institution\w*|ownership|stakes?)\b"), "institutional_ownership"),
     (re.compile(r"\binsider\w*\b"), "insider"),
-    (re.compile(r"\b(ratings?|price target|targets?|upgrade\w*|downgrade\w*|analysts?)\b"), "analyst_activity"),
-    (re.compile(r"\b(earnings|eps|print|call|guidance|transcript|8-?k|results?)\b"), "earnings"),
-    (re.compile(r"\b(news|headlines?)\b"), "news"),
-    (re.compile(r"\b(movers?|moving|tape|trading|intraday|why is it (up|down))\b"), "market_movement"),
+    (re.compile(r"\b(ratings?|price target|targets?|upgrade\w*|downgrade\w*|analysts?|estimates?|consensus|revisions?)\b"), "analyst_activity"),
+    (re.compile(r"\b(earnings|eps|print|calls?|guidance|transcripts?|8-?ks?|10-?[qk]s?|results?|reported|reporting|decks?|presentations?|filings?)\b"), "earnings"),
+    (re.compile(r"\b(news|headlines?|announce\w*|breaking)\b"), "news"),
+    (re.compile(r"\b(movers?|moving|tape|trading|intraday|gainers?|losers?|volatil\w*|why is \w+ (up|down))\b"), "market_movement"),
+    (re.compile(r"\b(strateg(y|ies)|portfolios?|baskets?|picks?|smid|momentum)\b"), "strategy"),
+    (re.compile(r"\b(predict\w*|forecasts?|model scores?|expected returns?)\b"), "prediction"),
 ]
+
+# One entry point per episode for a market-wide sweep when the question names neither a
+# type nor a family: the episode's first member is the event the rest of it follows from.
+_SWEEP_ORDER: tuple[str, ...] = ("earnings", "news", "realtime_mover", "thirteen_f_cycle")
 
 # Event families whose "reaction" is a price move worth reading off the tape.
 _REACTION_FAMILIES = {"earnings", "news", "market_movement"}
@@ -81,7 +159,42 @@ def iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 
-def question_family(question: Optional[str]) -> Optional[str]:
+def question_event_types(question: Optional[str], cards: Optional[dict[str, Any]] = None) -> list[str]:
+    """Every realtime event type the question names, in the order the user named them.
+
+    Matched against EVENT_VOCABULARY (deterministic, never an LLM). When `cards` is given,
+    types the live ontology does not know are dropped so the plan never emits a call
+    for a type the backend would reject.
+    """
+    if not question:
+        return []
+    hits: list[tuple[int, str]] = []
+    for t, pattern in _EVENT_VOCABULARY_RE.items():
+        if cards is not None and t not in cards:
+            continue
+        m = pattern.search(question)
+        if m:
+            hits.append((m.start(), t))
+    hits.sort()
+    ordered = [t for _, t in hits]
+    # a family's catch-all type yields to a more specific sibling that also matched:
+    # "which hedge funds exited" is 13f_exited, not the generic position-change feed.
+    for generic, siblings in _GENERIC_YIELDS_TO.items():
+        if generic in ordered and any(s in ordered for s in siblings):
+            ordered.remove(generic)
+            ordered.append(generic)
+    return ordered
+
+
+def question_family(question: Optional[str], asked_types: Optional[list[str]] = None,
+                    cards: Optional[dict[str, Any]] = None) -> Optional[str]:
+    """The family the question is about: the ontology family of the first type it names,
+    else the family its wording matches, else None. None is a real answer ("I do not
+    know what this is about") — callers must NOT replace it with a default family."""
+    for t in asked_types or []:
+        fam = ((cards or {}).get(t) or {}).get("family")
+        if fam:
+            return fam
     if not question:
         return None
     q = question.lower()
@@ -89,6 +202,13 @@ def question_family(question: Optional[str]) -> Optional[str]:
         if pattern.search(q):
             return family
     return None
+
+
+def unmapped_event_types(cards: dict[str, Any]) -> list[str]:
+    """Realtime event types the ontology knows but EVENT_VOCABULARY does not — a routing
+    gap the user would hit as a wrong plan, so it is surfaced instead of hidden.
+    Types with no family are episode markers (eps_market_reaction), not fetchable events."""
+    return sorted(t for t, c in cards.items() if t not in EVENT_VOCABULARY and (c or {}).get("family"))
 
 
 def cron_period_hours(cron: Optional[str]) -> float:
@@ -191,11 +311,17 @@ def situate_symbol(
     market: dict[str, Any],
     now: datetime,
     question_fam: Optional[str] = None,
+    asked_types: Optional[list[str]] = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    """Return (symbols[S] block, plan steps, skip entries, guidance lines) for one symbol."""
+    """Return (symbols[S] block, plan steps, skip entries, guidance lines) for one symbol.
+
+    `asked_types` are the realtime event types the question named (question_event_types):
+    they pick the episode and lead the payload steps, so "OKTA's deck" reads ir_publication
+    before whatever the episode would otherwise put first."""
     plan: list[dict[str, Any]] = []
     skip: list[dict[str, Any]] = []
     guidance: list[str] = []
+    asked = [t for t in (asked_types or []) if t in cards] if cards else list(asked_types or [])
 
     # ---- degraded web -------------------------------------------------------------
     if not isinstance(web, dict) or "error" in web or web.get("degraded") or not web.get("nodes"):
@@ -240,7 +366,15 @@ def situate_symbol(
         for ep in (cards.get(t) or {}).get("episodes") or []:
             membership.setdefault(ep["name"], []).append(t)
     primary_ep: Optional[str] = None
-    if question_fam:
+    for t in asked:  # the episode holding the type the user named wins outright
+        if t in newest_by_type:
+            for ep_name, members in membership.items():
+                if t in members:
+                    primary_ep = ep_name
+                    break
+        if primary_ep:
+            break
+    if primary_ep is None and question_fam:
         for ep_name, members in membership.items():
             if any((cards.get(t) or {}).get("family") == question_fam for t in members):
                 primary_ep = ep_name
@@ -354,9 +488,16 @@ def situate_symbol(
     in_episode = set(membership.get(primary_ep or "", []))
     payload_types = sorted(
         newest_by_type,
-        key=lambda t: (not (anchor and t == anchor["type"]), t not in in_episode,
+        key=lambda t: (t not in asked, not (anchor and t == anchor["type"]), t not in in_episode,
                        -(parse_ts(newest_by_type[t]["at"]) or now).timestamp()),
     )[:3]
+    for t in asked:
+        if t not in newest_by_type:
+            persisted = (cards.get(t) or {}).get("persisted_in")
+            guidance.append(f"{symbol}: you asked about {t} but the event web has no {t} node in the window"
+                            + (f" — its durable copy is {persisted}; widen window_days or ask for that relation by date"
+                               if persisted else " — widen window_days")
+                            + ". Say it is not recorded in the window, not that it did not happen.")
     explore_payloads: list[tuple[str, dict[str, Any], str]] = []
     for t in payload_types:
         n = newest_by_type[t]
@@ -475,39 +616,146 @@ def situate_symbol(
 
 
 # ---------------------------------------------------------------- universe scope
+UNIVERSE_PAYLOAD_CAP = 4
+
+
+def _episode_for_family(family: Optional[str], cards: dict[str, dict[str, Any]],
+                        episodes: dict[str, dict[str, Any]]) -> tuple[Optional[str], list[str]]:
+    """(episode name, member order) for a family: the episode most of its cards belong to."""
+    if not family:
+        return None, []
+    fam_types = [t for t, c in cards.items() if (c or {}).get("family") == family]
+    ep_names = [ep["name"] for t in fam_types for ep in (cards[t].get("episodes") or [])]
+    ep_name = max(set(ep_names), key=ep_names.count) if ep_names else None
+    order = list((episodes.get(ep_name) or {}).get("order") or []) if ep_name else []
+    return ep_name, order or fam_types
+
+
 def situate_universe(
-    family: str,
+    family: Optional[str],
     cards: dict[str, dict[str, Any]],
     episodes: dict[str, dict[str, Any]],
     market: dict[str, Any],
     now: datetime,
+    asked_types: Optional[list[str]] = None,
+    ttl_hours: int = DEFAULT_TTL_HOURS,
+    corpus: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    """No symbols: order the family's episode and hand back one list_realtime_events per member."""
+    """No symbols: what is going on across the market, planned from what the question NAMED.
+
+    Three shapes, in priority order:
+      1. The question names event types ("investor decks today") — step 1 is the first
+         named type, the other named types follow, then the rest of that type's episode
+         rotated to start after it. The user's noun is never buried at position four.
+      2. It names a family but no type ("any earnings today?") — the family's episode in
+         order, as before.
+      3. It names neither — a market-wide SWEEP: one call per episode entry point across
+         the whole realtime corpus (earnings, news, movers, 13F). There is NO default
+         family; guessing "earnings" for "what's going on?" answered a different question.
+    explore_data_catalogue is never planned here and is put on the skip list: the realtime
+    cache IS "today", and an unscoped explore over a persisted relation is a multi-minute
+    job over the whole table (the 2026-09-10 outage was a 127 MB result from exactly that).
+    `corpus` (list_options("event_types") rows) is echoed in the block so the agent can see
+    every type it could ask for without a second enumeration call.
+    """
     plan: list[dict[str, Any]] = []
+    skip: list[dict[str, Any]] = []
     guidance: list[str] = []
-    fam_types = [t for t, c in cards.items() if c.get("family") == family]
-    ep_names = [ep["name"] for t in fam_types for ep in (cards[t].get("episodes") or [])]
-    ep_name = max(set(ep_names), key=ep_names.count) if ep_names else None
-    order = (episodes.get(ep_name) or {}).get("order") or fam_types if ep_name else fam_types
-    if not order:
-        order = ["eps_update", "8k_release", "biggest_mover"]
-        guidance.append(f"ontology has no cards for family '{family}' — falling back to a default event order")
-    for t in order[:4]:
+    asked = [t for t in (asked_types or []) if not cards or t in cards]
+    if not family and asked:
+        family = ((cards.get(asked[0]) or {}).get("family")) or None
+    ep_name, ep_order = _episode_for_family(family, cards, episodes)
+
+    # episode markers (eps_market_reaction: no family, no payload) are not fetchable types
+    fetchable = [t for t in ep_order if not cards or (cards.get(t) or {}).get("family")]
+    if asked:
+        shape = "named_types"
+        rotated: list[str] = []
+        if asked[0] in fetchable:
+            i = fetchable.index(asked[0])
+            rotated = fetchable[i + 1:] + fetchable[:i]
+        order = asked + [t for t in rotated if t not in asked]
+    elif family and fetchable:
+        shape = "family"
+        order = fetchable
+    elif family:
+        shape = "family"
+        order = []
+        persisted = sorted({(c or {}).get("persisted_in") for c in cards.values()
+                            if (c or {}).get("family") == family and (c or {}).get("persisted_in")})
+        guidance.append(f"The ontology has no realtime event types for family '{family}' — nothing to read from the "
+                        f"{ttl_hours}h cache. " + (f"Its durable relations: {', '.join(persisted)}." if persisted else
+                                                    "Ask get_event_ontology(family=...) for its relations."))
+    else:
+        shape = "sweep"
+        order = []
+        sweep_episode: dict[str, str] = {}
+        for ep in _SWEEP_ORDER:
+            first = next((t for t in (episodes.get(ep) or {}).get("order") or []
+                          if (cards.get(t) or {}).get("family")), None)
+            if first and first not in order:
+                order.append(first)
+                sweep_episode[first] = ep
+        if not order:  # ontology degraded: the corpus is still known from the vocabulary
+            order = ["eps_update", "company_update", "biggest_mover", "13f_significant_position_change"]
+            sweep_episode = dict(zip(order, _SWEEP_ORDER))
+        guidance.append("The question named neither an event type nor a family, so this is a market-wide sweep: "
+                        "one call per episode entry point. If the user meant something specific, the universe.event_types "
+                        "list names every realtime type — re-run situate with that word in the question, or call "
+                        "list_realtime_events for that type directly.")
+
+    for t in order[:UNIVERSE_PAYLOAD_CAP]:
         c = cards.get(t) or {}
-        plan.append(_step("payload", "list_realtime_events", {"event_type": t},
-                          f"{ep_name or family} episode member {order.index(t) + 1} of {len(order)}"
-                          + (f"; persisted in {c['persisted_in']} once out of the cache" if c.get("persisted_in") else ""),
-                          provenance="declared"))
-    if market.get("is_open"):
+        if t in asked:
+            why = f"the question names {t} (asked #{asked.index(t) + 1} of {len(asked)})"
+        elif shape == "sweep":
+            why = f"market-wide sweep: entry point of the {sweep_episode.get(t, 'realtime')} episode"
+        else:
+            why = f"{ep_name or family} episode member {ep_order.index(t) + 1 if t in ep_order else '?'} of {len(ep_order)}"
+        if c.get("persisted_in"):
+            why += f"; persisted in {c['persisted_in']} once out of the cache"
+        plan.append(_step("payload", "list_realtime_events", {"event_type": t}, why, provenance="declared",
+                          optional=shape != "named_types" and t != order[0]))
+    if market.get("is_open") and "biggest_mover" not in order[:UNIVERSE_PAYLOAD_CAP]:
         plan.append(_step("reaction", "list_realtime_events", {"event_type": "biggest_mover"},
                           "market is open — confirmed movers off 30-minute bars", provenance="declared", optional=True))
-    guidance.append(f"Chain from the first non-empty result: narrow every follow-up with tickers=[...] "
-                    f"to the symbols just seen. Episode order for {ep_name or family}: {' -> '.join(order)}.")
-    guidance.append("An empty list means the 12h cache is cold for that type — say so; read the card's "
-                    "persisted_in relation with explore_data_catalogue for anything older.")
-    block = {"family": family, "episode": ep_name, "order": order,
-             "cards": {t: trim_card(cards[t]) for t in order[:4] if t in cards}}
-    return block, plan, [], guidance
+
+    persisted_asked = [f"{t} -> {cards[t]['persisted_in']}" for t in asked if (cards.get(t) or {}).get("persisted_in")]
+    skip.append(_skip("explore_data_catalogue", None,
+                      f"not for a 'today' / 'right now' question: the {ttl_hours}h realtime cache IS today. An unscoped "
+                      "explore over a persisted relation is a multi-minute job that returns the whole table. Only if the "
+                      f"user asks for MORE than {ttl_hours}h of history: one explore, scoped to ONE relation, an explicit "
+                      "date window, and tickers=[...] from the realtime results"
+                      + (f" ({'; '.join(persisted_asked)})." if persisted_asked else ".")))
+    skip.append(_skip("generate_research_report", None, "~10-12 minute job; not for a what-is-going-on question"))
+
+    if asked:
+        guidance.append(f"Step 1 is {asked[0]} because the question names it. Rank and answer from that result; the later "
+                        "steps are the rest of its episode for context, not substitutes. Narrow every follow-up with "
+                        "tickers=[...] to the symbols just seen.")
+    elif order:
+        guidance.append(f"Chain from the first non-empty result: narrow every follow-up with tickers=[...] to the symbols "
+                        f"just seen. Order: {' -> '.join(order[:UNIVERSE_PAYLOAD_CAP])}.")
+    guidance.append(f"An empty list means the {ttl_hours}h cache is cold for that type — say so. It is not evidence nothing "
+                    "happened, and it is not a reason to dispatch explore_data_catalogue (see skip).")
+    gaps = unmapped_event_types(cards) if cards else []
+    if gaps:
+        guidance.append(f"routing gap: the ontology has realtime types situate cannot match by keyword yet "
+                        f"({', '.join(gaps)}) — call list_realtime_events for them directly if the question means one of them.")
+
+    block: dict[str, Any] = {
+        "shape": shape, "family": family, "episode": ep_name, "asked_types": asked, "order": order,
+        "cards": {t: trim_card(cards[t]) for t in order[:UNIVERSE_PAYLOAD_CAP] if t in cards},
+    }
+    if corpus:
+        block["event_types"] = [
+            {"event_type": r.get("event_type"), "family": r.get("family"),
+             "description": (r.get("description") or "").split(" — ")[0].split(". ")[0][:140]}
+            for r in corpus if r.get("event_type")
+        ]
+    elif cards:
+        block["event_types"] = [{"event_type": t, "family": c.get("family")} for t, c in cards.items() if (c or {}).get("family")]
+    return block, plan, skip, guidance
 
 
 # --------------------------------------------------------------------- compose
