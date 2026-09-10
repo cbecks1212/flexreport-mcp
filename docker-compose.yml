@@ -12,4 +12,8 @@ services:
       API_HTTP_TIMEOUT: "${API_HTTP_TIMEOUT:-60}"
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8000"
+      # OAuth resource-server config. Must match the backend's `iss`/`aud` claims or
+      # every call 401s at the transport (see auth_verifier.py). Defaults mirror prod.
+      OAUTH_ISSUER: "${OAUTH_ISSUER:-https://flexreportfinapi.com}"
+      OAUTH_AUDIENCE: "${OAUTH_AUDIENCE:-https://mcp.flexreportfinapi.com/mcp}"
     restart: unless-stopped
