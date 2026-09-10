@@ -200,6 +200,20 @@ async def _ontology_graph(ctx: Context) -> Any:
     return res
 
 
+async def _realtime_event_corpus(ctx: Context) -> list[dict[str, Any]]:
+    """The realtime-event corpus (`list_options("event_types")`: every type, its family and
+    a one-line description), cached in-process like the ontology. Echoed by `situate` in
+    universe scope so the agent sees every type it could ask for. [] when unavailable."""
+    hit = _ONTOLOGY_CACHE.get("event_types")
+    if hit and time.monotonic() - hit[0] < _ONTOLOGY_CACHE_TTL_S:
+        return hit[1]
+    res = await _send(ctx, "GET", _OPTION_ENDPOINTS["event_types"], require_auth=False)
+    rows = res if isinstance(res, list) else []
+    if rows:
+        _ONTOLOGY_CACHE["event_types"] = (time.monotonic(), rows)
+    return rows
+
+
 @mcp.tool(annotations=ToolAnnotations(title="Situate: What Is Going On Right Now", readOnlyHint=True))
 async def situate(
     ctx: Context,
@@ -212,10 +226,15 @@ async def situate(
     ===> Call this FIRST for: "catch me up on X", "what happened / why", "anything
     before earnings?", "any earnings / 8-Ks / 13F moves / movers today?", "how is X
     trading", and BEFORE aiming explore_data_catalogue, list_realtime_events or a
-    report tool at a company. Pass the user's question verbatim in `question` (it is
-    matched by keyword to an event family, never sent to an LLM). Synchronous, public.
+    report tool at a company. Pass the user's question verbatim in `question`: it is
+    matched by keyword (never an LLM) against EVERY realtime event type — decks/
+    presentations -> ir_publication, 8-Ks, transcripts, upgrades, gainers/losers, 13F
+    exits, baskets, predictions, ... — and the plan STARTS at the type the user named.
+    A question naming only a family ("any earnings today?") walks that family's episode;
+    one naming neither ("what's going on?") sweeps every episode. Synchronous, public.
       situate(symbols=["OKTA"], question="catch me up on OKTA")   one or more names (max 5)
       situate(question="any earnings events today?")             no symbols = the market
+      situate(question="most significant investor decks today")  step 1 = ir_publication
 
     It reads the company event web (what HAPPENED to this company), the event ontology
     (what that KIND of event entails, what follows it and how soon, where its payload
@@ -229,20 +248,27 @@ async def situate(
                       age vs the TTL), freshness[] (per relation: last_refresh_at,
                       next_run_at, reflects_newest_event), cards (trimmed ontology
                       cards), deepen (tools the ontology says deepen this event)
-      universe        (no symbols) the family's episode order and cards
+      universe        (no symbols) shape (named_types | family | sweep), asked_types,
+                      the plan order and cards, and event_types: the WHOLE realtime
+                      corpus (type, family, one-line description) so you never guess
       plan[]          ORDERED tool calls: {step, tool, args, why, auth, sync, optional,
                       provenance, fallback}. `tool` is an exact tool name and `args`
                       are valid for it — pass them through unchanged.
       skip[]          calls that would return nothing or waste a job (an event type
                       that aged out of the cache, a 10-minute report) — DO NOT make these.
+      suggest[]       calls to make ONLY IF their `when` arises after the plan has run
+                      (explore_data_catalogue lives here, never in plan[]: it is a
+                      multi-minute job, and "the user wants more than the 12h cache
+                      holds" is the situation that earns it).
       guidance[]      situation-scoped rules: which tables have NOT refreshed since the
                       event, which followers are overdue, filer-scoped 13F nodes.
 
     HOW TO EXECUTE:
       1. Run plan[] in order. `sync=false` steps return a task_id — poll
-         get_task_status. If a step errors (e.g. drilldown not-authenticated), use its
-         `fallback`.
+         get_task_status.
       2. Never make a call that appears in skip[]; quote its `why` if the user asks.
+         Make a suggest[] call only when its `when` is true — an empty realtime list
+         is NOT that condition; say the cache is cold instead.
       3. Read guidance[] before writing: an "overdue" follower is "not recorded yet",
          not "did not happen"; a relation with reflects_newest_event=false shows the
          PRIOR period, never the reaction.
@@ -257,17 +283,17 @@ async def situate(
     the plan still runs on what remains — follow it, and say what was unknown.
     """
     now = datetime.now(timezone.utc)
-    qfam = situate_mod.question_family(question)
     onto_task = _ontology_graph(ctx)
     market_task = _send(ctx, "GET", "/is-market-open", params={"exchange": "NYSE"}, require_auth=False)
     syms = [s.strip().upper() for s in (symbols or []) if s and s.strip()][:5]
+    corpus_task = _realtime_event_corpus(ctx) if not syms else asyncio.sleep(0, result=[])
     web_tasks = [
         _send(ctx, "GET", "/get-company-event-web",
               params={"symbol": s, **({"window_days": window_days} if window_days else {})},
               require_auth=False)
         for s in syms
     ]
-    onto, market_raw, *webs = await asyncio.gather(onto_task, market_task, *web_tasks)
+    onto, market_raw, corpus, *webs = await asyncio.gather(onto_task, market_task, corpus_task, *web_tasks)
 
     market = situate_mod.parse_market(market_raw)
     degraded: list[str] = []
@@ -284,6 +310,11 @@ async def situate(
         ttl = int(onto.get("realtime_cache_ttl_hours") or situate_mod.DEFAULT_TTL_HOURS)
         onto_as_of = onto.get("as_of")
 
+    # Route from what the question NAMES: realtime event types first (checked against the
+    # live ontology when it is available), then the family. A miss is None, never a default.
+    qtypes = situate_mod.question_event_types(question, cards or None)
+    qfam = situate_mod.question_family(question, qtypes, cards)
+
     plan: list = []
     skip: list = []
     guidance: list = []
@@ -292,14 +323,14 @@ async def situate(
     if syms:
         for s, web in zip(syms, webs):
             block, p, k, g = situate_mod.situate_symbol(
-                s, web, cards, relations, episodes, ttl, market, now, qfam)
+                s, web, cards, relations, episodes, ttl, market, now, qfam, qtypes)
             symbol_blocks[s] = block
             plan += p; skip += k; guidance += g
             if block.get("error"):
                 degraded.append(f"{s}: event web errored ({block['error']})")
     else:
-        fam = qfam or "earnings"
-        universe_block, p, k, g = situate_mod.situate_universe(fam, cards, episodes, market, now)
+        universe_block, p, k, g = situate_mod.situate_universe(
+            qfam, cards, episodes, market, now, qtypes, ttl, corpus)
         plan += p; skip += k; guidance += g
 
     return situate_mod.compose(
