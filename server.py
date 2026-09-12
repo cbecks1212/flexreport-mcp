@@ -817,6 +817,27 @@ async def list_available_reports(
          built — check again in a minute.)
       2) Research-first — skip the events step: call this with no filter to see every symbol
          with real-time research available now, grouped by the event that triggered it.
+
+    PICKING THE MOST PERTINENT PLANS ("pull the most relevant reports today", "what's worth
+    reading right now"): the list is an inventory, not a ranking — a nightly company_update
+    plan sits next to a transcript that just landed. Rank by the EVENT, not by the plan:
+      a) FILTER on what published — list_realtime_events for the material types
+         (transcript_update, 8k_release, ir_publication, eps_release / eps_update,
+         financials_release) and for the tape (biggest_mover, biggest_loser,
+         biggest_gainer). A symbol on BOTH lists — a filing or call AND a move — is
+         the strongest candidate.
+      b) ANALYZE the content — read the event payloads (what the 8-K discloses, what the
+         call said, what the deck guides to) and keep the ones that change something;
+         `situate(question=...)` and get_event_ontology say what each type means.
+      c) CONFIRM with intraday price action — detect_intraday_outlier_jumps(tickers=[...])
+         (and get_aftermarket_data after the close) shows whether the market treated it
+         as significant; a print with no reaction ranks below a mover with a filing.
+      d) MATCH to plans — call this tool with event_types=[<the types from a>] and keep
+         the candidates that appear, preferring `fresh: true`; `queued_at` should be the
+         event you just read.
+      e) PULL the winners — generate_report_for_stock(ticker) for the few that survived,
+         not the whole list; tell the user which were fresh (seconds) and which would
+         rebuild (minutes), and offer the rebuilds only if they want to wait.
     `event_types` accepts any of the plan-earning types above (plus company_update); the
     backend rejects (422) any other type. Omit it for every plan.
 
