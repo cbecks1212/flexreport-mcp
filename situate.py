@@ -53,6 +53,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "predict_earnings_move": {"auth": "required", "sync": True},
     "list_earnings_announcements": {"auth": "required", "sync": True},
     "get_latest_report": {"auth": "required", "sync": True},
+    "list_available_reports": {"auth": "required", "sync": True},
     "generate_report_for_stock": {"auth": "required", "sync": False},
     "generate_research_report": {"auth": "required", "sync": False},
 }
