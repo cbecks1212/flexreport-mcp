@@ -53,6 +53,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "predict_earnings_move": {"auth": "required", "sync": True},
     "list_earnings_announcements": {"auth": "required", "sync": True},
     "get_latest_report": {"auth": "required", "sync": True},
+    "list_available_reports": {"auth": "required", "sync": True},
     "generate_report_for_stock": {"auth": "required", "sync": False},
     "generate_research_report": {"auth": "required", "sync": False},
 }
@@ -135,6 +136,12 @@ _QUESTION_FAMILIES: list[tuple[re.Pattern[str], str]] = [
 # One entry point per episode for a market-wide sweep when the question names neither a
 # type nor a family: the episode's first member is the event the rest of it follows from.
 _SWEEP_ORDER: tuple[str, ...] = ("earnings", "news", "realtime_mover", "thirteen_f_cycle")
+
+# Realtime event types whose publication saves a report plan (RealtimeEventCatalogue
+# .REPORT_PLAN_EVENT_TYPES on the backend, plus the nightly company_update). The only types
+# list_available_reports accepts; anything else is a 422.
+REPORT_PLAN_EVENT_TYPES: tuple[str, ...] = ("eps_update", "eps_release", "8k_release", "financials_release",
+                                            "ir_publication", "transcript_update", "company_update")
 
 # Event families whose "reaction" is a price move worth reading off the tape.
 _REACTION_FAMILIES = {"earnings", "news", "market_movement"}
@@ -757,6 +764,18 @@ def situate_universe(
                              "returns the whole table (thousands of rows, minutes); scope it to ONE relation, an explicit "
                              "date window and tickers=[...]",
                          reads=[persisted] if persisted else None))
+    # A named type or family scopes the plan listing to the types just read; a sweep ranks
+    # across every event-driven type (company_update is nightly housekeeping, not a signal).
+    material = [t for t in REPORT_PLAN_EVENT_TYPES if t != "company_update"]
+    plan_types = [t for t in order[:UNIVERSE_PAYLOAD_CAP] if t in REPORT_PLAN_EVENT_TYPES] if shape != "sweep" else []
+    plan.append(_suggest("list_available_reports",
+                         {"event_types": plan_types or material},
+                         when="the user wants THE REPORTS on the names that stand out ('pull the most relevant "
+                              "research today') — after the realtime results are read and the movers confirmed "
+                              "(detect_intraday_outlier_jumps), never before",
+                         why="the inventory of saved report plans by triggering event: `fresh: true` renders via "
+                             "generate_report_for_stock(ticker) in ~10-20 s, false rebuilds for minutes. Rank by the "
+                             "event (a filing or call AND a move), match to plans, then build only the winners"))
     skip.append(_skip("generate_research_report", None, "~10-12 minute job; not for a what-is-going-on question"))
 
     if asked:

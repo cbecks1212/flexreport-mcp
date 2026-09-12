@@ -373,6 +373,11 @@ async def list_realtime_events(
     An EMPTY list means the cache is cold for that event type (12h TTL), not
     that nothing happened.
 
+    A material event here (eps_update, eps_release, 8k_release, financials_release,
+    ir_publication, transcript_update) means a report plan was saved for the symbol:
+    `list_available_reports(event_types=[<this type>])` says which of them
+    generate_report_for_stock renders fresh in seconds.
+
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
     body: dict[str, Any] = {"event_type": event_type}
@@ -412,7 +417,9 @@ async def generate_report_for_stock(
     the symbol's latest report inputs — a print, a filing, a 13F refresh) or listed it
     in `missing`. The finished PDF replaces the cached one. If the saved plan is itself
     stale or absent, the backend rebuilds it (~10 min) and saves it for next time — so
-    poll the task rather than assume a fixed runtime.
+    poll the task rather than assume a fixed runtime. To know WHICH before you commit
+    the user to a wait, `list_available_reports` lists every saved plan with a `fresh`
+    flag that applies this same rule.
 
     CUSTOM (`user_override=true` + the shaping fields, ~10 minutes, NOT cached): a full
     rebuild from scratch around what the user named. Use it ONLY when the user
@@ -768,10 +775,83 @@ async def get_latest_report(
                       builds one (a symbol's FIRST build is a full ~10 min run and
                       is saved for next time), or `onboard_symbol` if the ticker is
                       not covered.
+    To see which symbols have real-time research READY to render — by the event that
+    triggered it, across the universe, before anything is built — use
+    `list_available_reports` instead: it lists saved plans, not cached PDFs.
     """
     return await _send(
         ctx, "POST", "/get-cached-reports", json=symbols
     )
+
+
+@mcp.tool(annotations=ToolAnnotations(title="List Available Report Plans", readOnlyHint=True))
+async def list_available_reports(
+    ctx: Context,
+    event_types: Optional[list[str]] = None,
+) -> Any:
+    """List the symbols with a SAVED report plan — the real-time research generate_report_for_stock
+    can render right now, and whether each renders in seconds or needs a rebuild.
+
+    A plan is saved the moment a material event publishes for a symbol (eps_update,
+    eps_release, 8k_release, financials_release, ir_publication, transcript_update) and
+    nightly for company_update. This tool is the INVENTORY of those plans — it does not
+    build or return a report. Returns a list, newest plan first:
+      [{"symbol": "NVDA", "event_type": "eps_release",
+        "planned_at": "<iso>",   # when the plan was built
+        "queued_at": "<iso>",    # the report inputs (the event) it was built from
+        "fresh": true,           # see below
+        "source": "redis"}, ...] # redis = built within 3 days, s3 = older durable copy
+    `fresh` applies the SAME rule /create-full-report applies:
+      fresh: true  -> generate_report_for_stock(ticker) — ticker ONLY — renders this plan
+                      as-is in ~10-20 s. These are the names to build for.
+      fresh: false -> a newer event landed after the plan; the same call rebuilds the plan
+                      first (~10 min). Say so before the user waits on it.
+      not listed   -> no plan yet: a first build is a full ~10 min run (or `onboard_symbol`
+                      if the ticker is not covered).
+
+    TWO WAYS IN:
+      1) Event-first — list_realtime_events(event_type=...) shows what just published; call
+         this with event_types=[<that type>] to confirm which of those symbols have a plan
+         and which are fresh, then generate_report_for_stock(ticker) for the ones the user
+         wants. (An event in the 12h cache with no plan here means the plan is still being
+         built — check again in a minute.)
+      2) Research-first — skip the events step: call this with no filter to see every symbol
+         with real-time research available now, grouped by the event that triggered it.
+
+    PICKING THE MOST PERTINENT PLANS ("pull the most relevant reports today", "what's worth
+    reading right now"): the list is an inventory, not a ranking — a nightly company_update
+    plan sits next to a transcript that just landed. Rank by the EVENT, not by the plan:
+      a) FILTER on what published — list_realtime_events for the material types
+         (transcript_update, 8k_release, ir_publication, eps_release / eps_update,
+         financials_release) and for the tape (biggest_mover, biggest_loser,
+         biggest_gainer). A symbol on BOTH lists — a filing or call AND a move — is
+         the strongest candidate.
+      b) ANALYZE the content — read the event payloads (what the 8-K discloses, what the
+         call said, what the deck guides to) and keep the ones that change something;
+         `situate(question=...)` and get_event_ontology say what each type means.
+      c) CONFIRM with intraday price action — detect_intraday_outlier_jumps(tickers=[...])
+         (and get_aftermarket_data after the close) shows whether the market treated it
+         as significant; a print with no reaction ranks below a mover with a filing.
+      d) MATCH to plans — call this tool with event_types=[<the types from a>] and keep
+         the candidates that appear, preferring `fresh: true`; `queued_at` should be the
+         event you just read.
+      e) PULL the winners — generate_report_for_stock(ticker) for the few that survived,
+         not the whole list; tell the user which were fresh (seconds) and which would
+         rebuild (minutes), and offer the rebuilds only if they want to wait.
+    `event_types` accepts any of the plan-earning types above (plus company_update); the
+    backend rejects (422) any other type. Omit it for every plan.
+
+    Not `get_latest_report`: that returns the CACHED PDF for named tickers (with its own
+    `stale` flag). This tool answers "for which symbols could I get a fresh report, and
+    how fast?" — by event, across the universe — before anything is built. Not
+    `generate_research_report`: that is the broad, topical, or multi-company writeup;
+    the plans listed here are single-symbol, event-anchored reports.
+
+    Synchronous, cheap (500/hour). Requires auth (your MCP client attaches the OAuth
+    bearer automatically).
+    """
+    body: dict[str, Any] = {"event_types": event_types} if event_types else {}
+    return await _send(ctx, "POST", "/list-available-reports", json=body)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Download Report PDF", readOnlyHint=True))
