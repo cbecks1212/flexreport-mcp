@@ -774,8 +774,9 @@ def situate_universe(
                               "research today') — after the realtime results are read and the movers confirmed "
                               "(detect_intraday_outlier_jumps), never before",
                          why="the inventory of saved report plans by triggering event: `fresh: true` renders via "
-                             "generate_report_for_stock(ticker) in ~10-20 s, false rebuilds for minutes. Rank by the "
-                             "event (a filing or call AND a move), match to plans, then build only the winners"))
+                             "get_latest_report([ticker]) in ~10-20 s, false rebuilds via generate_report_for_stock for "
+                             "minutes. Rank by the event (a filing or call AND a move), match to plans, then pull only "
+                             "the winners"))
     skip.append(_skip("generate_research_report", None, "~10-12 minute job; not for a what-is-going-on question"))
 
     if asked:
