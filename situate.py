@@ -768,15 +768,24 @@ def situate_universe(
     # across every event-driven type (company_update is nightly housekeeping, not a signal).
     material = [t for t in REPORT_PLAN_EVENT_TYPES if t != "company_update"]
     plan_types = [t for t in order[:UNIVERSE_PAYLOAD_CAP] if t in REPORT_PLAN_EVENT_TYPES] if shape != "sweep" else []
+    # list_available_reports defaults to plans built TODAY (backend clock, UTC). When the
+    # realtime cache window opened on an earlier date — every US evening, once UTC rolls
+    # over — the plans for the events just read were built "yesterday": carry that date.
+    plan_args: dict[str, Any] = {"event_types": plan_types or material}
+    window_opened = (now - timedelta(hours=ttl_hours)).astimezone(timezone.utc).date()
+    if window_opened < now.astimezone(timezone.utc).date():
+        plan_args["report_date"] = window_opened.isoformat()
     plan.append(_suggest("list_available_reports",
-                         {"event_types": plan_types or material},
+                         plan_args,
                          when="the user wants THE REPORTS on the names that stand out ('pull the most relevant "
                               "research today') — after the realtime results are read and the movers confirmed "
                               "(detect_intraday_outlier_jumps), never before",
                          why="the inventory of saved report plans by triggering event: `fresh: true` renders via "
                              "get_latest_report([ticker]) in ~10-20 s, false rebuilds via generate_report_for_stock for "
-                             "minutes. Rank by the event (a filing or call AND a move), match to plans, then pull only "
-                             "the winners"))
+                             "minutes. Lists plans built on or after report_date (default today): an empty list means "
+                             "nothing was planned in the window — widen report_date (plans render for 7 days) before "
+                             "saying there is no research. Rank by the event (a filing or call AND a move), match to "
+                             "plans, then pull only the winners"))
     skip.append(_skip("generate_research_report", None, "~10-12 minute job; not for a what-is-going-on question"))
 
     if asked:

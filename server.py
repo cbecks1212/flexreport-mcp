@@ -778,7 +778,8 @@ async def get_latest_report(
     ~6h) — hand it to the user to download/open the document directly (and prefer it
     on clients that can't handle a large base64 blob); `report` is the inline base64
     PDF — decode it to read, render, or summarize the report's contents yourself.
-    Symbols are normalized (uppercased, de-duplicated) by the backend.
+    Symbols are normalized (uppercased, de-duplicated) by the backend. At most 100
+    symbols per call after dedupe (413 above that) — split a longer list.
 
     READ ALL THREE BEFORE YOU HAND ANYTHING OVER. Nothing regenerates on its own:
       in `rendering` -> the symbol's saved plan is fresh and is being rendered into the
@@ -815,9 +816,11 @@ async def get_latest_report(
 async def list_available_reports(
     ctx: Context,
     event_types: Optional[list[str]] = None,
+    report_date: Optional[str] = None,
 ) -> Any:
-    """List the symbols with a SAVED report plan — the real-time research get_latest_report
-    can render right now, and whether each renders in seconds or needs a rebuild.
+    """List the symbols with a report plan SAVED on or after `report_date` (default: TODAY) —
+    the real-time research get_latest_report can render right now, and whether each renders
+    in seconds or needs a rebuild.
 
     A plan is saved the moment a material event publishes for a symbol (eps_update,
     eps_release, 8k_release, financials_release, ir_publication, transcript_update) and
@@ -835,8 +838,11 @@ async def list_available_reports(
       fresh: false -> a newer event landed after the plan; get_latest_report returns the
                       stale cached PDF, and only generate_report_for_stock(ticker) — a full
                       rebuild, ~10 min — refreshes it. Say so before the user waits on it.
-      not listed   -> no plan yet: a first build is a full ~10 min run (or `onboard_symbol`
-                      if the ticker is not covered).
+      not listed   -> no plan IN THE WINDOW. An empty result does not mean there is no
+                      research — it means nothing was planned in the window. Widen
+                      `report_date` before concluding a symbol has no plan; only then is
+                      a first build a full ~10 min run (or `onboard_symbol` if the ticker
+                      is not covered).
 
     TWO WAYS IN:
       1) Event-first — list_realtime_events(event_type=...) shows what just published; call
@@ -844,8 +850,10 @@ async def list_available_reports(
          and which are fresh, then get_latest_report(symbols=[...]) for the ones the user
          wants. (An event in the 12h cache with no plan here means the plan is still being
          built — check again in a minute.)
-      2) Research-first — skip the events step: call this with no filter to see every symbol
-         with real-time research available now, grouped by the event that triggered it.
+      2) Research-first — skip the events step: call this with no filter for every symbol
+         planned TODAY, grouped by the event that triggered it. Plans stay renderable for 7
+         days, so pass report_date="YYYY-MM-DD" (e.g. 3 days back) when the user wants the
+         running inventory rather than today's, or when today's list comes back thin.
 
     PICKING THE MOST PERTINENT PLANS ("pull the most relevant reports today", "what's worth
     reading right now"): the list is an inventory, not a ranking — a nightly company_update
@@ -869,7 +877,9 @@ async def list_available_reports(
          its cached PDF. Tell the user which is which, and offer generate_report_for_stock
          rebuilds (~10 min each) only if they want to wait.
     `event_types` accepts any of the plan-earning types above (plus company_update); the
-    backend rejects (422) any other type. Omit it for every plan.
+    backend rejects (422) any other type. Omit it for every type. `report_date`
+    (YYYY-MM-DD, default today) is a lower bound on when the plan was built — earlier dates
+    widen the window and cost more; a malformed date is a 422.
 
     Not `get_latest_report`: that PULLS the reports for named tickers (renders the fresh
     plans, serves the cached PDF for the rest). This tool answers "for which symbols could
@@ -880,7 +890,11 @@ async def list_available_reports(
     Synchronous, cheap (500/hour). Requires auth (your MCP client attaches the OAuth
     bearer automatically).
     """
-    body: dict[str, Any] = {"event_types": event_types} if event_types else {}
+    body: dict[str, Any] = {}
+    if event_types:
+        body["event_types"] = event_types
+    if report_date:
+        body["report_date"] = report_date
     return await _send(ctx, "POST", "/list-available-reports", json=body)
 
 
