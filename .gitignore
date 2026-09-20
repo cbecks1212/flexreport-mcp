@@ -13,3 +13,5 @@ deploy/
 
 # Generated report artifacts
 reports/
+
+tests/
