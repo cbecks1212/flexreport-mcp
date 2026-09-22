@@ -68,6 +68,10 @@ make it available in every directory. See [Auth](#auth) for details.
 | `detect_intraday_outlier_jumps(symbol, zscore_threshold)` | `GET /detect-intraday-outlier-jumps` | Live look at today's 1-min tape; flags minutes whose move is a daily-sigma outlier (synchronous, authed) |
 | `get_aftermarket_data(symbols, start_datetime, end_datetime)` | `POST /get-aftermarket-data` | Query **stored** after-hours 15-minute bars (open/high/low/close/volume, 16:00-20:00 ET) for symbols over an ET datetime range; rows ordered symbol, bar time DESC (defaults to today, authed, 300/min) |
 | `onboard_symbol(symbol)` | `POST /onboard-symbol` | Request onboarding of an uncovered ticker (async, authed, 5/hour) |
+| `stream_events(topics, symbols, cursor, max_events, max_wait_seconds)` | `GET /events` (SSE) | **Push delivery, ad-hoc.** A bounded read of the realtime-event stream: returns after `max_events` matched events or `max_wait_seconds` (cap 55 s) with `{events, cursor, closed}` — each event is the same object `list_realtime_events` returns, the moment it publishes. Filter inline by `topics` (event types **or** families from `list_options("event_types")`, plus the stream-only `report_plan` topic — a frame each time a report plan is saved) and `symbols`. No server-side state: **always pass the returned `cursor` back in** or the next call starts at "now" (authed) |
+| `register_event_subscription(topics, symbols)` | `POST /register-subscription` | Save a filter server-side → `{subscription_id, filter, cursor, created_at}`. Only events published after registration are delivered; keep the id (no list endpoint yet). 30/hour (authed) |
+| `stream_event_subscription(subscription_id, cursor, max_events, max_wait_seconds)` | `GET /event-subscription/{id}` (SSE) | **Push delivery, resumable.** Same bounded-read shape as `stream_events`, but the API saves the cursor when the read closes, so repeated calls see every matching event exactly once with no `cursor` bookkeeping; `cursor` only overrides the saved position for one connection. `closed: "subscription deleted"` means stop reconnecting; 404 covers a missing id and another user's id alike (authed) |
+| `delete_event_subscription(subscription_id)` | `DELETE /event-subscription/{id}` | Remove a saved subscription; any open stream on it ends with a `closed` frame within one read cycle (authed) |
 
 For a single named company, `get_company_snapshot` and `get_company_event_web` are the **standard pair** — the two halves of the same question, usually called together. The snapshot is the **what** (where the company stands now: thesis, fundamentals, technicals, ownership, grades); the event web is the **why** (the episode behind it: earnings print → 8-K → transcript update → IR publication → analyst reaction, with edges saying how each relates). A snapshot on its own is a verdict with no evidence; the web is the evidence. The web is also the cheap grounding call that makes the rest of the loop precise — each node carries the exact follow-up call, so the next `list_realtime_events`, `explore_data_catalogue`, or report request carries real event types and dates instead of guessed ones.
 
@@ -86,6 +90,30 @@ Reports are on-demand: nothing regenerates until someone asks. The two report en
 - **Bespoke requests go through exploration, not a rebuild.** The agent explores the items the user named (`list_saved_queries`, then `explore_data_catalogue`), ideates with them over the result sets, and overlays the agreed results into their template (`get_user_template`) with its own document tooling.
 
 `list_available_reports(event_types, report_date)` is the inventory of those saved plans, scoped to plans built on or after `report_date` (default today) — which symbols have real-time research ready and whether each is `fresh` (`get_latest_report` renders it in seconds) or would rebuild (minutes) — so the agent can go from `list_realtime_events` (an event published) to a fresh report without guessing, or skip the events step and list what is available outright. For "pull the most relevant reports today" the events are the filter and the plans are the availability check, in that order: pull the material types (`transcript_update`, `8k_release`, `ir_publication`, `eps_release`, `financials_release`) and the tape (`biggest_mover`, `biggest_loser`), read the content, confirm significance against intraday price action (`detect_intraday_outlier_jumps`), match the survivors to plans with `list_available_reports(event_types=[...])`, and pull only those with `get_latest_report`. `situate` surfaces this as a suggestion on every market-wide plan, carrying `report_date` when the 12h realtime window opened on an earlier UTC date. Only an explicit ask for the pipeline's own report rebuilt around named items makes it a **custom** report — `user_override=true` plus the shaping lists (`financial_items`, `ratios`, `as_reported_financial_items`, `revenue_segment`, `technical_analysis_items`, `estimate_items`, `institutional_ownership` CIKs, `include_as_report_financials` / `as_reported_periods`) — which is a full build (~10 min) that is never saved. The backend rejects shaping lists without the switch (422), so the tool sets it whenever a shaping field is non-empty. Vocabularies come from `list_options`: `financial_items`, `financial_ratios`, `technical_indicators`, and the ticker-scoped `as_reported_items` / `revenue_segments` and the `q`-scoped `institutional_managers` (returns CIKs). Event context is server-owned — the request carries no thesis, change-summary, `include_*`, or price-date fields.
+
+## Code layout
+
+```
+server.py            entrypoint: imports the tools package, adds /health, runs the transport
+core.py              the FastMCP instance, server instructions and `_send` (backend forwarding)
+client.py            shared httpx client + inbound-bearer forwarding
+auth_verifier.py     OAuth resource-server token validation (RS256 via the backend JWKS)
+situate.py           pure composition logic behind the `situate` tool
+instructions.json    server instructions (non-code copy)
+tools/
+  realtime_events.py     situate, list_realtime_events, company snapshot / event web, event ontology
+  event_subscriptions.py stream_events, register / stream / delete_event_subscription (SSE bounded reads)
+  pdf_reports.py         get_latest_report, list_available_reports, generate_*, download_pdf_from_url, PDF templates
+  data_exploration.py    explore_data_*, signed drilldowns, trace_data_sources, document sections, saved queries
+  utility.py             get_task_status, list_options, list_sub_industries, onboard_symbol, billing
+  market_data.py         technical indicators, intraday outliers, after-hours bars, earnings calendar, market status
+  strategies.py          screen_stocks, portfolio optimization, stock picks, strategy track records
+  scheduling.py          schedule / list / delete scheduled tasks
+```
+
+Each module does `from core import mcp, _send` and registers with `@mcp.tool(...)`;
+importing `tools` registers everything. `tools/__init__.py` fixes the import order,
+which is the order tools are advertised to clients (situate first).
 
 ## Run locally
 
