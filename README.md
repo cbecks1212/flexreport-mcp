@@ -28,6 +28,29 @@ On the first data call your MCP client runs an OAuth sign-in in your browser —
 sign in or register when prompted; you never paste a token. Add `--scope user` to
 make it available in every directory. See [Auth](#auth) for details.
 
+## Demo
+
+**Stream real-time events in the terminal.** Ask Claude to watch the market and
+events arrive as they land: movers, earnings releases, 8-Ks, IR decks and fresh
+report plans. As each report plan saves, Claude renders the refreshed report.
+
+> *"Look out for the biggest movers, earnings releases, transcript updates, investor
+> decks, and 8K releases post market close, streaming these as they happen with Flexreport"*
+>
+> *"For every thing that comes, can you check if the latest report plan is available,
+> to pull a refreshed report to provide deeper context"*
+
+![Claude Code streaming Flexreport events after the close and rendering reports as their plans land](docs/demo/stream.gif)
+
+**Open the research report.** Every figure links back to the query that produced
+it, and every headline links to its source. Here's a report for AAPL:
+
+> *"Get me the latest flexreport report for AAPL"*
+
+<a href="docs/demo/AAPL_report.pdf"><img src="docs/demo/aapl-report-p1.png" alt="Page 1 of the Flexreport AAPL company deep dive" width="600"></a>
+
+[Open the full AAPL report (PDF, 13 pages)](docs/demo/AAPL_report.pdf)
+
 ## Use-cases
 
 ### 1. Real-time
