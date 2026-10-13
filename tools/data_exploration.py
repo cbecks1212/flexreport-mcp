@@ -1,20 +1,36 @@
 """Data exploration tools: catalogue exploration, coverage, signed drilldowns, source tracing, saved queries."""
 
 import json
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 from urllib.parse import parse_qs, urlsplit
 
 from mcp.server.fastmcp import Context
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
-from core import mcp, _send
+from core import mcp, _send, _ok
+from schemas.data_exploration import (
+    DeleteSavedQueryResult,
+    DocumentSectionResult,
+    QueryRowsResult,
+    SavedQueriesResult,
+    SavedQueryReplayResult,
+    SaveQueryResult,
+    TaskDispatch,
+    TraceSourcesResult,
+)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Explore Data Catalogue", readOnlyHint=False, destructiveHint=False))
 async def explore_data_catalogue(
     ctx: Context,
-    query: str,
-) -> Any:
+    query: Annotated[
+        str,
+        Field(description="The exploration question in natural language, e.g. \"how have semiconductor "
+                          "margins trended over the past 8 quarters?\"."),
+    ],
+) -> TaskDispatch:
     """Explore Flexreport's data platform with an OPEN-ENDED question — designed to handle many research based or open ended questions, enabling interactive EDA.
 
     ===> BEFORE running this, call `list_saved_queries` and match the question against
@@ -65,8 +81,6 @@ async def explore_data_catalogue(
     There is no `delivery` argument here: results always go to the dashboard so the user
     can interact with them. The job is rate-limited to 20/hour per user server-side.
 
-    `query` is natural language.
-
     Asynchronous: returns {"task_id": "...", "status": "PENDING"}. Poll a SINGLE task
     with `get_task_status` until SUCCESS (the result is a plain dict — there is NO nested
     task to chase). Expect roughly 1-5 minutes depending on the tables queried — a task
@@ -112,17 +126,21 @@ async def explore_data_catalogue(
     after the event — it does not hold the event yet and the query will show the prior
     period as if it were the reaction.
     """
-    return await _send(
+    return _ok(await _send(
         ctx, "POST", "/data-catalogue-exploration",
         json={"query": query},
-    )
+    ))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Explore Data Coverage", readOnlyHint=False, destructiveHint=False))
 async def explore_data_coverage(
     ctx: Context,
-    query: str,
-) -> Any:
+    query: Annotated[
+        str,
+        Field(description="The coverage question in natural language, as asked — e.g. \"count the distinct "
+                          "symbols in the investor relations dataset, broken out by sector\"."),
+    ],
+) -> TaskDispatch:
     """Answer a question about WHAT THE PLATFORM COVERS — how many symbols a dataset holds, broken down any way you like.
 
     ===> THE TOOL for coverage COUNTS and BREAKDOWNS: "how many symbols are covered in
@@ -154,9 +172,6 @@ async def explore_data_coverage(
     There is no `delivery` argument: results always go to the dashboard so the user can
     interact with them. Rate-limited to 20/hour server-side.
 
-    `query` is natural language — pass the coverage question as asked ("count the
-    distinct symbols in the investor relations dataset, broken out by sector").
-
     Asynchronous: returns {"task_id": "...", "status": "PENDING"}. Poll a SINGLE task
     with `get_task_status` until SUCCESS (the result is a plain dict — there is NO
     nested task to chase). Expect roughly 1-5 minutes depending on the tables queried —
@@ -172,10 +187,10 @@ async def explore_data_coverage(
     from the platform's data, `result` instead carries a `validation_status` of
     "REJECTED" (with a reason) — relay that rather than retrying blindly.
     """
-    return await _send(
+    return _ok(await _send(
         ctx, "POST", "/data-coverage-exploration",
         json={"query": query}, require_auth=False,
-    )
+    ))
 
 
 def _query_token(reference: str) -> str:
@@ -231,19 +246,36 @@ def _replay_args(values: Any = None, max_rows: Any = None) -> tuple[dict[str, An
 @mcp.tool(annotations=ToolAnnotations(title="Run Signed Drilldown Query", readOnlyHint=True))
 async def get_signed_sql_drilldown(
     ctx: Context,
-    encrypted_query_token: str,
-    prompt: Optional[str] = None,
-    values: Optional[dict] = None,
-    max_rows: Optional[int] = None,
-) -> Any:
+    encrypted_query_token: Annotated[
+        str,
+        Field(description="A node's `signed_query_url` from get_company_event_web, or just its `t` "
+                          "parameter — verbatim. Never construct or edit one; never pass SQL."),
+    ],
+    prompt: Annotated[
+        Optional[str],
+        Field(description="Placeholder-twin tokens only: natural-language fill for slots `values` did not "
+                          "cover, e.g. \"the same rows for KSS\". Omit for a plain event-web link.",
+              max_length=2000),
+    ] = None,
+    values: Annotated[
+        Optional[dict],
+        Field(description="Placeholder-twin tokens only (preferred over prompt): {slot name: typed value}, "
+                          "filled deterministically, e.g. {\"symbol\": \"KSS\"}. Omit for a plain link."),
+    ] = None,
+    max_rows: Annotated[
+        Optional[int],
+        Field(description="Cap on rows returned, e.g. 500; the response then carries row_count and "
+                          "truncated: true. Pass it on any drilldown that can fan out to constituents.",
+              ge=1, le=100000),
+    ] = None,
+) -> QueryRowsResult:
     """Fetch the rows behind an event-web drilldown from its server-minted query token.
 
     Some `get_company_event_web` nodes carry `signed_query_url` in their `fetch` hint —
     an opaque, tamper-proof link the backend minted for exactly that node. This tool is
     the zero-planning rung of the chain: no query to compose, the rows come back
     directly. Pass either the full `signed_query_url` or just its `t` parameter; the
-    URL form is unwrapped automatically. Tokens are minted server-side only — NEVER
-    construct, guess, or modify one, and never pass SQL here. A token that came from a
+    URL form is unwrapped automatically. A token that came from a
     SAVED request rather than the event web belongs to `run_saved_query` instead — same
     endpoint, but it replays every query in the saved row in one call.
 
@@ -267,21 +299,15 @@ async def get_signed_sql_drilldown(
     HTTP 403 means the token is invalid or tampered — do not retry with an altered
     token; re-fetch the event web for a fresh link instead.
 
-    `values` and `prompt` (both optional) re-aim a token that is a PLACEHOLDER TWIN at
-    other entities; leave both out for a plain event-web link and the rows come back
-    unchanged. `values` is the preferred form — a JSON object of {slot name: typed
-    value} that fills those slots deterministically, with no language model in the
-    loop. `prompt` ("the same rows for KSS") fills whatever `values` did not, from the
-    wording. Either way the response carries `parameters` (what was substituted)
-    alongside `rows`; echo those to the user. A 422 means the request could not be
+    `values` and `prompt` re-aim a token that is a PLACEHOLDER TWIN at other entities;
+    the response then carries `parameters` (what was substituted) alongside `rows`;
+    echo those to the user. A 422 means the request could not be
     mapped onto the token's slots. The full slot vocabulary of a SAVED row lives in
     `list_saved_queries` -> `metadata.parameters`, and replaying a saved row is
     `run_saved_query`, not this tool.
 
-    `max_rows` (optional, e.g. 500) caps the rows serialized back; the response then
-    carries `row_count` (the full count) and `truncated: true`. Pass it on any
-    drilldown that can fan out to constituents — an uncapped one can return tens of
-    thousands of rows and stall the client for minutes.
+    An uncapped drilldown that fans out to constituents can return tens of thousands
+    of rows and stall the client for minutes — pass `max_rows`.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically) — unlike
     `get_company_event_web`, which is public: the web hands out the LINK to anyone, but
@@ -290,11 +316,11 @@ async def get_signed_sql_drilldown(
     """
     extra, err = _replay_args(values, max_rows)
     if err:
-        return {"error": err}
+        raise ToolError(err)
     params: dict[str, Any] = {"t": _query_token(encrypted_query_token), **extra}
     if prompt and prompt.strip():
         params["prompt"] = prompt.strip()
-    return await _send(ctx, "GET", "/query-data", params=params)
+    return _ok(await _send(ctx, "GET", "/query-data", params=params))
 
 
 _KEYS_ERROR = ('`keys` must be a JSON array of row objects carrying that relation\'s GRAIN '
@@ -337,15 +363,47 @@ def _trace_keys(keys: Any) -> tuple[Optional[str], Optional[str]]:
 @mcp.tool(annotations=ToolAnnotations(title="Trace Numbers To Their Sources", readOnlyHint=True))
 async def trace_data_sources(
     ctx: Context,
-    relation: Optional[str] = None,
-    keys: Optional[list[dict]] = None,
-    column: Optional[str] = None,
-    encrypted_query_token: Optional[str] = None,
-    prompt: Optional[str] = None,
-    values: Optional[dict] = None,
-    max_documents: Optional[int] = None,
-    resolve_passages: bool = False,
-) -> Any:
+    relation: Annotated[
+        Optional[str],
+        Field(description="Preferred form: a relation name from the result's `sources.relations[].relation`. "
+                          "Pass with `keys`."),
+    ] = None,
+    keys: Annotated[
+        Optional[list[dict]],
+        Field(description="With `relation`: one object per row to trace, carrying EVERY identifying column "
+                          "(the grain AND the period/date), e.g. [{\"symbol\": \"SNOW\", \"cik\": "
+                          "\"0001273087\", \"date\": \"2026-06-30\"}]. A few dozen rows, not the whole set."),
+    ] = None,
+    column: Annotated[
+        Optional[str],
+        Field(description="With `relation`: trace ONE value column instead of the row — needed for YoY/change "
+                          "relations (see `sources.relations[].per_column`)."),
+    ] = None,
+    encrypted_query_token: Annotated[
+        Optional[str],
+        Field(description="Fallback form: a `trace_token` from a sources block, or the original `query_token` / "
+                          "`signed_query_url`, verbatim. Never construct or edit one; never pass SQL."),
+    ] = None,
+    prompt: Annotated[
+        Optional[str],
+        Field(description="Token form, placeholder twins only: natural-language fill for slots `values` did "
+                          "not cover.", max_length=2000),
+    ] = None,
+    values: Annotated[
+        Optional[dict],
+        Field(description="Token form, placeholder twins only: {slot name: typed value} that re-aims the token "
+                          "deterministically."),
+    ] = None,
+    max_documents: Annotated[
+        Optional[int],
+        Field(description="Cap on documents returned (server default 50).", ge=1, le=500),
+    ] = None,
+    resolve_passages: Annotated[
+        bool,
+        Field(description="relation+keys form: also fetch the passage TEXT behind each citation (capped at "
+                          "20). Ask for it when you intend to quote, not by reflex."),
+    ] = False,
+) -> TraceSourcesResult:
     """Resolve numbers you are holding back to the documents they were read from — the filing, the section, or the verified quote.
 
     The CITATION rung of the chain. `explore_data_catalogue`, `run_saved_query` and
@@ -401,17 +459,10 @@ async def trace_data_sources(
     change relation, where each value column resolves to a DIFFERENT filing (the
     result's `sources.relations[].per_column` says which columns work this way).
 
-    `resolve_passages=True` also fetches the passage TEXT behind each citation (the
-    speaker turn, or the filing section from the reader) instead of just a link. It
-    costs a fetch and is capped at 20 passages, so ask for it when you intend to quote,
-    not by reflex — a link is already a citation. Applies to the `relation` + `keys`
-    form.
-
-    `max_documents` caps the documents returned (server default 50, max 500).
-    `values` and `prompt` apply to the TOKEN form only, and only for a token that is a
-    placeholder twin: `values` is a JSON object of {slot name: typed value} that
-    re-aims it deterministically, `prompt` fills from wording what `values` did not.
-    Neither can change WHICH documents come back for a given set of rows.
+    `resolve_passages=True` fetches the speaker turn or filing section text instead of
+    just a link — a link is already a citation. `values` and `prompt` re-aim a
+    placeholder-twin token but cannot change WHICH documents come back for a given set
+    of rows.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically). A 403 means
     the token is invalid or tampered — re-fetch the link rather than retrying an altered
@@ -419,15 +470,15 @@ async def trace_data_sources(
     """
     token = _query_token(encrypted_query_token) if encrypted_query_token else None
     if not relation and not token:
-        return {"error": "Pass either `relation` + `keys` (preferred — take both from the "
-                         "result's `sources` block), or `encrypted_query_token`."}
+        raise ToolError("Pass either `relation` + `keys` (preferred — take both from the "
+                        "result's `sources` block), or `encrypted_query_token`.")
 
     params: dict[str, Any] = {}
     if relation:
         params["relation"] = relation.strip()
         encoded, err = _trace_keys(keys)
         if err:
-            return {"error": err}
+            raise ToolError(err)
         if encoded:
             params["keys"] = encoded
         if column and column.strip():
@@ -438,7 +489,7 @@ async def trace_data_sources(
         params["t"] = token
         extra, err = _replay_args(values)
         if err:
-            return {"error": err}
+            raise ToolError(err)
         params.update(extra)
     if prompt and prompt.strip():
         params["prompt"] = prompt.strip()
@@ -446,23 +497,34 @@ async def trace_data_sources(
         try:
             cap = int(max_documents)
         except (TypeError, ValueError):
-            return {"error": "`max_documents` must be an integer between 1 and 500, e.g. 50."}
+            raise ToolError("`max_documents` must be an integer between 1 and 500, e.g. 50.")
         if not 1 <= cap <= 500:
-            return {"error": "`max_documents` must be between 1 and 500, e.g. 50."}
+            raise ToolError("`max_documents` must be between 1 and 500, e.g. 50.")
         params["max_documents"] = cap
 
-    return await _send(ctx, "GET", "/trace-sources", params=params)
+    # An unknown relation comes back as HTTP 200 {"error": ...}; _ok raises that too.
+    return _ok(await _send(ctx, "GET", "/trace-sources", params=params))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Source Document Section", readOnlyHint=True))
 async def get_document_section(
     ctx: Context,
-    symbol: str,
-    year: int,
-    quarter: int,
-    n: int,
-    name: str = "earnings_transcript",
-) -> Any:
+    symbol: Annotated[str, Field(description="Ticker the cited call belongs to, read off the citation.")],
+    year: Annotated[
+        int,
+        Field(description="FISCAL year of the call (never the calendar year a report covers), read off the "
+                          "citation URL or transcript record."),
+    ],
+    quarter: Annotated[
+        int,
+        Field(description="FISCAL quarter of the call, read off the citation URL or transcript record."),
+    ],
+    n: Annotated[int, Field(description="1-based section number (the speaker turn), e.g. the citation's `n` or `section_no`.")],
+    name: Annotated[
+        str,
+        Field(description="Whitelisted section source; \"earnings_transcript\" is the only one today."),
+    ] = "earnings_transcript",
+) -> DocumentSectionResult:
     """Open ONE numbered section of a source document — the exact earnings-call speaker turn a citation points at.
 
     The other end of a `trace_data_sources` citation, and the finest grain the platform
@@ -482,9 +544,6 @@ async def get_document_section(
     A 404 here ("no section N for SYM YEARqQ") is almost always this, not a missing
     call: re-check the period before concluding the transcript is not covered.
 
-    `name` is the whitelisted section source; `earnings_transcript` (the default) is
-    the one that exists today. `n` is 1-based within the document.
-
     Returns {"name", "symbol", "year", "quarter", "n", "format": "paragraph",
     "count", "rows": [{symbol, year, quarter, call_date, section_no, speaker,
     content}], "highlights": [...], "total_sections": N, "transcript_url": ...}.
@@ -500,19 +559,27 @@ async def get_document_section(
     """
     symbol = (symbol or "").strip().upper()
     if not symbol:
-        return {"error": "`symbol` is required — the ticker the cited call belongs to."}
-    return await _send(ctx, "GET", "/query-section", params={
+        raise ToolError("`symbol` is required — the ticker the cited call belongs to.")
+    return _ok(await _send(ctx, "GET", "/query-section", params={
         "name": (name or "earnings_transcript").strip(),
         "symbol": symbol, "year": year, "quarter": quarter, "n": n,
-    })
+    }))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Save Data Request For Replay", readOnlyHint=False, destructiveHint=False))
 async def save_user_query(
     ctx: Context,
-    user_request: str,
-    query_tokens: list[str],
-) -> Any:
+    user_request: Annotated[
+        str,
+        Field(description="The request being saved, in the user's own words — the row's only human-readable "
+                          "label, so make it specific (\"weekly EPS-revision check on my semis basket\")."),
+    ],
+    query_tokens: Annotated[
+        list[str],
+        Field(description="The `query_token` of each exploration `results` entry, passed through EXACTLY as "
+                          "returned (a signed URL is unwrapped). Skip entries with no token. Never write SQL."),
+    ],
+) -> SaveQueryResult:
     """Save the queries an exploration already planned, so the request can be replayed instantly — exactly, or re-asked for other entities.
 
     THE POINT: `explore_data_catalogue` is a full validate -> plan -> run pipeline that
@@ -531,17 +598,9 @@ async def save_user_query(
     clearly implies they will want it again. Do NOT save every exploration by reflex,
     and do not save a one-off.
 
-    `user_request` — the natural-language request being saved, in the user's own words.
-    It is the ONLY human-readable label on the saved row, so make it specific enough to
-    recognise later ("weekly EPS-revision check on my semis basket", not "the query").
-
-    `query_tokens` — the `query_token` values from the exploration result's `results`
-    entries, one per named query, passed through EXACTLY as returned. Each is opaque
-    ciphertext the server minted around the planned SQL; a full `signed_query_url` /
-    `source_url` is accepted too and unwrapped to its token. NEVER write, guess, or
-    edit a token, and never pass SQL here — a token this backend did not mint cannot be
-    decrypted and fails with 403 at replay time, long after the exploration is gone. A
-    result entry carrying no `query_token` has nothing to save; skip it.
+    Each query token is opaque ciphertext the server minted around the planned SQL.
+    NEVER write, guess, or edit one — a token this backend did not mint cannot be
+    decrypted and fails with 403 at replay time, long after the exploration is gone.
 
     Owner-scoped: the row belongs to the calling user and is invisible to everyone
     else. There is NO upsert (unlike `schedule_task`): saving the same request twice
@@ -549,7 +608,7 @@ async def save_user_query(
     stale one rather than piling up near-duplicates.
 
     Returns {"msg": "Successfully saved query: <user_request>", "id": <row id>,
-    "placeholder_status": "PENDING" | "NOT_DISPATCHED"}. `id` is the delete key.
+    "placeholder_status": "PENDING" | "NOT_DISPATCHED", "placeholder_id_to_poll"}. `id` is the delete key.
     PENDING means the placeholder twins AND the row's `metadata` (its slot schema,
     summary, and datasets) are being authored — roughly 10 s to 5 minutes, depending on
     the size of the queries. Until they land, `query_placeholder` and `metadata` are
@@ -562,18 +621,18 @@ async def save_user_query(
     """
     tokens = [_query_token(t) for t in query_tokens if t and t.strip()]
     if not tokens:
-        return {"error": "query_tokens is required — pass the `query_token` values from the exploration result."}
-    return await _send(
+        raise ToolError("query_tokens is required — pass the `query_token` values from the exploration result.")
+    return _ok(await _send(
         ctx, "POST", "/save-user-query",
         json={"user_request": user_request, "queries": tokens},
-    )
+    ))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List Saved Data Requests", readOnlyHint=True))
 async def list_saved_queries(
     ctx: Context,
-    limit: int = 50,
-) -> Any:
+    limit: Annotated[int, Field(description="Max rows to return, newest first.", ge=1, le=500)] = 50,
+) -> SavedQueriesResult:
     """List the data requests you have saved with `save_user_query`, newest first.
 
     The entry point to the replay flow: check HERE FIRST, before running
@@ -633,8 +692,7 @@ async def list_saved_queries(
         you reused, but not what to decide on.
       - `id` is what `delete_saved_query` takes.
 
-    `limit` is 1-500 (default 50). Duplicate `user_request` values are possible —
-    saving does not upsert.
+    Duplicate `user_request` values are possible — saving does not upsert.
 
     An HTTP 503 here means the backend's saved-queries table has not been created yet,
     NOT that the user has nothing saved — report that difference rather than an empty
@@ -643,17 +701,45 @@ async def list_saved_queries(
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     Rate-limited 100/min.
     """
-    return await _send(ctx, "GET", "/get-saved-queries", params={"limit": limit})
+    resp = _ok(await _send(ctx, "GET", "/get-saved-queries", params={"limit": limit}))
+    # The backend returns the bare row list (with `metadata` JSONB as a JSON string);
+    # shape it into the {count, saved_queries} envelope documented above.
+    rows = resp.get("saved_queries", []) if isinstance(resp, dict) else resp
+    for row in rows:
+        meta = row.get("metadata")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except ValueError:
+                meta = None
+            row["metadata"] = meta if isinstance(meta, dict) else None
+    return SavedQueriesResult(count=len(rows), saved_queries=rows)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Run Saved Data Request", readOnlyHint=True))
 async def run_saved_query(
     ctx: Context,
-    query_tokens: list[str],
-    prompt: Optional[str] = None,
-    values: Optional[dict] = None,
-    max_rows: Optional[int] = None,
-) -> Any:
+    query_tokens: Annotated[
+        list[str],
+        Field(description="A saved row's `queries` list (exact replay) or its `query_placeholder` list "
+                          "(re-aiming with values/prompt), verbatim. Max 25. Never construct or edit a token."),
+    ],
+    prompt: Annotated[
+        Optional[str],
+        Field(description="Natural-language fill for slots `values` did not cover, e.g. \"the past 8 quarters "
+                          "of sales for KSS\". Placeholder tokens only.", max_length=2000),
+    ] = None,
+    values: Annotated[
+        Optional[dict],
+        Field(description="PREFERRED way to re-aim: {slot name: typed value}, keys from the row's "
+                          "`metadata.parameters`, e.g. {\"symbol\": \"KSS\"}. Entity-set slots take "
+                          "[{\"id\", \"name\"}] lists. Pass the same dict for every token."),
+    ] = None,
+    max_rows: Annotated[
+        Optional[int],
+        Field(description="Row cap per query, e.g. 500 — PASS IT ON EVERY REPLAY.", ge=1, le=100000),
+    ] = None,
+) -> SavedQueryReplayResult:
     """Re-run a saved request's queries against live data — exactly, or re-aimed at other entities with typed `values`. No planning, no polling.
 
     The payoff of `save_user_query`: pass a saved row's `queries` array from
@@ -662,19 +748,14 @@ async def run_saved_query(
     already covers the question — same SQL, current data, seconds instead of minutes,
     and it does not draw on the 20/hour exploration budget.
 
-    `query_tokens` — the saved row's `queries` list for an exact replay, or its
-    `query_placeholder` list when re-aiming with `values` / `prompt` — verbatim (a
-    full signed URL is accepted and unwrapped). Max 25 per call. Tokens are
-    server-minted only: never construct or edit one, and never pass SQL. For a token
+    A full signed URL is accepted in `query_tokens` and unwrapped. For a token
     that came from a `get_company_event_web` node rather than a saved row, use
     `get_signed_sql_drilldown` — same endpoint, single node, drilldown framing.
 
-    `values` — THE PREFERRED WAY to re-aim a saved row: a JSON object of {slot name:
-    typed value}, its keys taken from that row's `metadata.parameters` in
-    `list_saved_queries`. Slots filled here are substituted deterministically, with no
-    language model in the loop (~0.5-1.2 s per query). Reach for it whenever you
-    already know the entities — you usually do, having resolved the tickers or CIKs
-    before calling — and keep `prompt` for what you cannot type.
+    `values` slots are substituted deterministically, with no language model in the
+    loop (~0.5-1.2 s per query). Reach for it whenever you already know the entities —
+    you usually do, having resolved the tickers or CIKs before calling — and keep
+    `prompt` for what you cannot type.
       - Entity-set slots (type `cik_rows` / `symbol_rows`) take a LIST of {"id",
         "name"} objects: [{"id": "0001454027", "name": "Verition Fund Management LLC"}].
         A name-only entry ({"id": "", "name": "Walleye Capital"}) is resolved
@@ -685,16 +766,14 @@ async def run_saved_query(
       - A slot left out falls back to `prompt`, and then to the value the row was
         saved with (reported as `defaulted_parameters`).
 
-    `prompt` — natural-language fill for whatever `values` did not cover, e.g. "the
-    past 8 quarters of sales for KSS". Pass it with the row's `query_placeholder`
-    tokens; a plain `queries` token has no slots and replays unchanged. The backend
+    `prompt`: a plain `queries` token has no slots and replays unchanged. The backend
     maps the wording onto the row's typed slots. A 422 means it could not — fall back
     to `explore_data_catalogue` for that question. A prompt-only fill can also DRIFT (a
     slot the wording never mentions, a date say, can come back re-aimed), which is the
     second reason to prefer `values`: never infer the substituted values from the
     wording, read them out of `parameters` and say them back to the user.
 
-    `max_rows` (e.g. 500) — PASS IT ON EVERY REPLAY. Uncapped, a saved row's
+    `max_rows`: uncapped, a saved row's
     `_constituents` companion query returns 7,000-35,000 rows (3-8 MB) and the client
     stalls for minutes. A sliced result carries `row_count` (the full count) and
     `truncated: true`; say the user is seeing a slice of N rows.
@@ -738,12 +817,12 @@ async def run_saved_query(
     """
     tokens = [_query_token(t) for t in query_tokens if t and t.strip()]
     if not tokens:
-        return {"error": "query_tokens is required — pass the `queries` (or `query_placeholder`) array from list_saved_queries."}
+        raise ToolError("query_tokens is required — pass the `queries` (or `query_placeholder`) array from list_saved_queries.")
     if len(tokens) > 25:
-        return {"error": f"Too many query tokens ({len(tokens)}); a saved request holds a handful. Max 25 per call."}
+        raise ToolError(f"Too many query tokens ({len(tokens)}); a saved request holds a handful. Max 25 per call.")
     extra, err = _replay_args(values, max_rows)
     if err:
-        return {"error": err}
+        raise ToolError(err)
     prompt = prompt.strip() if prompt else None
 
     # Sequential, not fanned out: a saved request holds a few queries, each one is a
@@ -757,18 +836,20 @@ async def run_saved_query(
         params: dict[str, Any] = {"t": token, **({"prompt": prompt} if prompt else {}), **extra}
         payload = await _send(ctx, "GET", "/query-data", params=params)
         results.append({"index": i, **(payload if isinstance(payload, dict) else {"result": payload})})
-    return {"queries_run": len(results), "results": results}
+    return SavedQueryReplayResult(queries_run=len(results), results=results)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Delete Saved Data Request", readOnlyHint=False, destructiveHint=True, idempotentHint=True))
 async def delete_saved_query(
     ctx: Context,
-    query_id: int,
-) -> Any:
+    query_id: Annotated[
+        int,
+        Field(description="The row's `id` from list_saved_queries — not a list position, not the user_request."),
+    ],
+) -> DeleteSavedQueryResult:
     """Delete one of your saved data requests by id.
 
-    `query_id` is the `id` from `list_saved_queries` — NOT a position in that list and
-    not the `user_request`. Deletion is permanent and touches no data, but the query
+    Deletion is permanent and touches no data, but the query
     tokens go with the row and cannot be reconstructed: re-creating it means running
     `explore_data_catalogue` again and re-saving. When more than one row looks like a
     match, confirm WHICH one with the user before calling.
@@ -782,7 +863,7 @@ async def delete_saved_query(
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     Rate-limited 100/min.
     """
-    return await _send(
+    return _ok(await _send(
         ctx, "DELETE", "/delete-saved-query",
         params={"query_id": query_id},
-    )
+    ))

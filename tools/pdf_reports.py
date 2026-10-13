@@ -1,12 +1,24 @@
 """PDF report tools: cached report pulls, plan inventory, full rebuilds, research reports, PDF templates."""
 
 import base64
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from mcp.server.fastmcp import Context
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
-from core import mcp, _send
+from core import mcp, _send, _ok
+from schemas.pdf_reports import (
+    CachedReportsResult,
+    DeleteTemplateResult,
+    DownloadedPdf,
+    ReportPlansResult,
+    StockReportResult,
+    TaskDispatch,
+    TemplateTask,
+    UserTemplateRecord,
+)
 
 
 # The fields that shape a CUSTOM company report — Report.OVERRIDE_FIELDS on the backend.
@@ -22,18 +34,61 @@ _REPORT_SHAPING_FIELDS = (
 @mcp.tool(annotations=ToolAnnotations(title="Generate Stock Report", readOnlyHint=False, destructiveHint=False))
 async def generate_report_for_stock(
     ctx: Context,
-    ticker: str,
-    user_override: bool = False,
-    financial_items: Optional[list[str]] = None,
-    as_reported_financial_items: Optional[list[str]] = None,
-    ratios: Optional[list[str]] = None,
-    revenue_segment: Optional[list[str]] = None,
-    technical_analysis_items: Optional[list[str]] = None,
-    estimate_items: Optional[list[str]] = None,
-    institutional_ownership: Optional[list[str]] = None,
-    include_as_report_financials: bool = False,
-    as_reported_periods: Optional[list[str]] = None,
-) -> Any:
+    ticker: Annotated[str, Field(description="The ONE ticker to rebuild, e.g. \"SNOW\".")],
+    user_override: Annotated[
+        bool,
+        Field(description="CUSTOM mode switch (build around the shaping fields, not saved). Set automatically "
+                          "whenever any shaping field is non-empty."),
+    ] = False,
+    financial_items: Annotated[
+        Optional[list[str]],
+        Field(description="Standardized EDGAR line items (\"revenue\", \"operatingIncome\") "
+                          "from list_options(\"financial_items\")."),
+    ] = None,
+    as_reported_financial_items: Annotated[
+        Optional[list[str]],
+        Field(description="The filer's OWN tagged XBRL concepts (\"us-gaap_RevenueFromContractWithCustomer...\", "
+                          "or a company extension such as \"snow_...\") from "
+                          "list_options(\"as_reported_items\", ticker=...)."),
+    ] = None,
+    ratios: Annotated[
+        Optional[list[str]],
+        Field(description="EDGAR ratios (\"grossProfitMargin\") from list_options(\"financial_ratios\")."),
+    ] = None,
+    revenue_segment: Annotated[
+        Optional[list[str]],
+        Field(description="The filer's revenue segments (\"Product revenue\") from "
+                          "list_options(\"revenue_segments\", ticker=...)."),
+    ] = None,
+    technical_analysis_items: Annotated[
+        Optional[list[str]],
+        Field(description="Indicators to chart (\"rsi\", \"macd\") from list_options(\"technical_indicators\")."),
+    ] = None,
+    estimate_items: Annotated[
+        Optional[list[str]],
+        Field(description="Estimate line items to compare against actuals."),
+    ] = None,
+    institutional_ownership: Annotated[
+        Optional[list[str]],
+        Field(description="Managers to feature, by SEC CIK (any width; the backend pads to 10 digits). Get them "
+                          "from list_options(\"institutional_managers\", q=\"berkshire\") -> {cik, name, category, "
+                          "aum}; pass the `cik` values, never names."),
+    ] = None,
+    include_as_report_financials: Annotated[
+        bool,
+        Field(description="Add an AS-REPORTED statement section built from the SEC filing itself: every figure a "
+                          "tagged XBRL fact deep-linked to its location in the filed document (distinct from the "
+                          "standardized tables, whose derived figures no filer states). Line items come from "
+                          "`as_reported_financial_items` when given, else are chosen to match the narrative."),
+    ] = False,
+    as_reported_periods: Annotated[
+        Optional[list[str]],
+        Field(description="Window(s) the as-reported section shows: \"quarter\" (discrete three months, the "
+                          "default), \"ytd\" (cumulative), \"annual\" (fiscal year, from the 10-K). Several render "
+                          "as adjacent columns. Not cosmetic: a filing states the same concept over more than one "
+                          "window at the SAME period end, so the basis must be explicit."),
+    ] = None,
+) -> StockReportResult:
     """FULL REBUILD of ONE ticker's report (~10 minutes). Use sparingly — never the first call.
 
     The fast path is `get_latest_report([ticker])`: a symbol with a fresh saved report
@@ -62,43 +117,12 @@ async def generate_report_for_stock(
          template saved -> offer `draft_user_template`).
     That is faster, iterative, and the user sees the data before it is set in a PDF.
     Use CUSTOM mode only when the user explicitly wants the Flexreport pipeline's own
-    report rebuilt around those items and accepts the ~10 minute wait. Every field
-    below shapes a custom report, and the
-    backend rejects it (422) without `user_override=true` — this tool sets the switch
-    for you whenever any of them is non-empty, so a shaped request is never silently
-    served the standard report. Vocabularies — never guess, look each one up:
-      financial_items              standardized EDGAR line items ("revenue",
-                                   "operatingIncome") -> list_options("financial_items")
-      ratios                       EDGAR ratios ("grossProfitMargin")
-                                   -> list_options("financial_ratios")
-      as_reported_financial_items  the filer's OWN tagged XBRL concepts
-                                   ("us-gaap_RevenueFromContractWithCustomer...", or a
-                                   company extension such as "snow_...")
-                                   -> list_options("as_reported_items", ticker=...)
-      revenue_segment              the filer's revenue segments ("Product revenue")
-                                   -> list_options("revenue_segments", ticker=...)
-      technical_analysis_items     indicators to chart ("rsi", "macd")
-                                   -> list_options("technical_indicators")
-      estimate_items               estimate line items to compare against actuals
-      institutional_ownership      managers to feature, by SEC CIK (any width; the
-                                   backend pads to 10 digits)
-                                   -> list_options("institutional_managers", q="berkshire")
-                                   returns {cik, name, category, aum}; pass the `cik`
-                                   values, never names
-      include_as_report_financials adds an AS-REPORTED statement section built from the
-                                   SEC filing itself, every figure a tagged XBRL fact
-                                   that deep-links to its location in the filed
-                                   document (distinct from the standardized tables,
-                                   whose derived figures no filer states). Line items:
-                                   `as_reported_financial_items` when given, else
-                                   chosen to match the narrative
-      as_reported_periods          which window(s) that section shows: "quarter"
-                                   (discrete three months, the default), "ytd"
-                                   (cumulative), "annual" (fiscal year, from the
-                                   10-K). Several render as adjacent columns. Not
-                                   cosmetic: a filing states the same concept over
-                                   more than one window at the SAME period end, so
-                                   the basis must be explicit
+    report rebuilt around those items and accepts the ~10 minute wait. Every parameter
+    after `user_override` shapes a custom report, and the backend rejects it (422)
+    without `user_override=true` — this tool sets the switch for you whenever any of
+    them is non-empty, so a shaped request is never silently served the standard
+    report. Each parameter's description names its vocabulary — never guess, look
+    each one up.
 
     Event context is SERVER-owned: the backend reads the symbol's latest platform event
     and frames the report around it. There is no thesis / change-summary / include_* /
@@ -148,17 +172,20 @@ async def generate_report_for_stock(
     payload.update({k: v for k, v in shaping.items() if v})
     if user_override or len(payload) > 1:
         payload["user_override"] = True
-    return await _send(
+    return _ok(await _send(
         ctx, "POST", "/create-full-report", json=payload
-    )
+    ))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Generate Research Report", readOnlyHint=False, destructiveHint=False))
 async def generate_research_report(
     ctx: Context,
-    query: str,
-    delivery: str = "email",
-) -> Any:
+    query: Annotated[
+        str,
+        Field(description="The research question in natural language, e.g. \"high-growth semis with rising estimates\"."),
+    ],
+    delivery: Annotated[str, Field(description="Delivery channel for the finished report, e.g. \"email\" or \"dashboard\".")] = "email",
+) -> TaskDispatch:
     """Answer an OPEN-ENDED or THEMATIC research QUESTION (extensible, multi-section).
 
     ===> THE RIGHT TOOL when the user's intent is a QUESTION rather than a request for an
@@ -175,23 +202,32 @@ async def generate_research_report(
     reach for THIS deep-dive only later, once the user has reviewed the exploration and
     EXPLICITLY asks for the full report. Never run both for the same question at once.
 
-    `query` is natural language, e.g. "high-growth semis with rising estimates".
-    `delivery` defaults to "email". Rate-limited to 20/hour per user server-side.
+    Rate-limited to 20/hour per user server-side.
 
     Asynchronous: returns {"task_id": "...", "status": "PENDING"}. Poll with
     `get_task_status` until SUCCESS, then read its `result`.
     """
-    return await _send(
+    return _ok(await _send(
         ctx, "POST", "/generate-research-report",
         json={"query": query, "delivery": delivery},
-    )
+    ))
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Get Latest Cached Reports", readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(title="Get Latest Cached Reports", readOnlyHint=True),
+    # structured_output=False: results can be very large (base64 PDFs, task results
+    # like the 127 MB one behind the 2026-09-10 OOM), and structured output would
+    # send them twice (text + structuredContent). The model is still the documented shape.
+    structured_output=False,
+)
 async def get_latest_report(
     ctx: Context,
-    symbols: list[str],
-) -> Any:
+    symbols: Annotated[
+        list[str],
+        Field(description="One or many tickers, e.g. [\"SNOW\", \"AAPL\"]; uppercased and de-duplicated "
+                          "server-side, at most 100 after dedupe (413 above that)."),
+    ],
+) -> CachedReportsResult:
     """Get the latest Flexreport research report(s) for one or more tickers. USE THIS BY DEFAULT.
 
     ===> THIS IS THE DEFAULT, CORRECT TOOL whenever a user asks for "the report",
@@ -223,8 +259,7 @@ async def get_latest_report(
     ~6h) — hand it to the user to download/open the document directly (and prefer it
     on clients that can't handle a large base64 blob); `report` is the inline base64
     PDF — decode it to read, render, or summarize the report's contents yourself.
-    Symbols are normalized (uppercased, de-duplicated) by the backend. At most 100
-    symbols per call after dedupe (413 above that) — split a longer list.
+    Split a list longer than 100 symbols across calls.
 
     READ ALL THREE BEFORE YOU HAND ANYTHING OVER. Nothing regenerates on its own:
       in `rendering` -> the symbol's saved plan is fresh and is being rendered into the
@@ -252,17 +287,27 @@ async def get_latest_report(
     Rate-limited to 500/hour. Requires auth (your MCP client attaches the OAuth bearer
     automatically).
     """
-    return await _send(
+    return _ok(await _send(
         ctx, "POST", "/get-cached-reports", json=symbols
-    )
+    ))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List Available Report Plans", readOnlyHint=True))
 async def list_available_reports(
     ctx: Context,
-    event_types: Optional[list[str]] = None,
-    report_date: Optional[str] = None,
-) -> Any:
+    event_types: Annotated[
+        Optional[list[str]],
+        Field(description="Plan-earning event types to list: eps_update, eps_release, 8k_release, "
+                          "financials_release, ir_publication, transcript_update, company_update. Any other "
+                          "type is a 422. Omit for every type."),
+    ] = None,
+    report_date: Annotated[
+        Optional[str],
+        Field(description="Lower bound on when the plan was built, YYYY-MM-DD (default today). Earlier dates "
+                          "widen the window and cost more; plans stay renderable for 7 days. A malformed date "
+                          "is a 422."),
+    ] = None,
+) -> ReportPlansResult:
     """List the symbols with a report plan SAVED on or after `report_date` (default: TODAY) —
     the real-time research get_latest_report can render right now, and whether each renders
     in seconds or needs a rebuild.
@@ -270,12 +315,12 @@ async def list_available_reports(
     A plan is saved the moment a material event publishes for a symbol (eps_update,
     eps_release, 8k_release, financials_release, ir_publication, transcript_update) and
     nightly for company_update. This tool is the INVENTORY of those plans — it does not
-    build or return a report. Returns a list, newest plan first:
-      [{"symbol": "NVDA", "event_type": "eps_release",
-        "planned_at": "<iso>",   # when the plan was built
-        "queued_at": "<iso>",    # the report inputs (the event) it was built from
-        "fresh": true,           # see below
-        "source": "redis"}, ...] # redis = built within 3 days, s3 = older durable copy
+    build or return a report. Returns `plans`, newest plan first:
+      {"plans": [{"symbol": "NVDA", "event_type": "eps_release",
+                  "planned_at": "<iso>",   # when the plan was built
+                  "queued_at": "<iso>",    # the report inputs (the event) it was built from
+                  "fresh": true,           # see below
+                  "source": "redis"}, ...]}  # redis = built within 3 days, s3 = older durable copy
     `fresh` applies the SAME rule get_latest_report (/get-cached-reports) applies:
       fresh: true  -> get_latest_report([ticker]) renders this plan into the user's
                       template in ~10-20 s (it comes back under `rendering`). These are
@@ -321,10 +366,6 @@ async def list_available_reports(
          not the whole list: the fresh ones render in seconds; a stale one comes back as
          its cached PDF. Tell the user which is which, and offer generate_report_for_stock
          rebuilds (~10 min each) only if they want to wait.
-    `event_types` accepts any of the plan-earning types above (plus company_update); the
-    backend rejects (422) any other type. Omit it for every type. `report_date`
-    (YYYY-MM-DD, default today) is a lower bound on when the plan was built — earlier dates
-    widen the window and cost more; a malformed date is a 422.
 
     Not `get_latest_report`: that PULLS the reports for named tickers (renders the fresh
     plans, serves the cached PDF for the rest). This tool answers "for which symbols could
@@ -340,15 +381,26 @@ async def list_available_reports(
         body["event_types"] = event_types
     if report_date:
         body["report_date"] = report_date
-    return await _send(ctx, "POST", "/list-available-reports", json=body)
+    plans = _ok(await _send(ctx, "POST", "/list-available-reports", json=body))
+    return ReportPlansResult(plans=plans)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Download Report PDF", readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(title="Download Report PDF", readOnlyHint=True),
+    # structured_output=False: results can be very large (base64 PDFs, task results
+    # like the 127 MB one behind the 2026-09-10 OOM), and structured output would
+    # send them twice (text + structuredContent). The model is still the documented shape.
+    structured_output=False,
+)
 async def download_pdf_from_url(
     ctx: Context,
-    url: str,
-    file_name: str,
-) -> Any:
+    url: Annotated[
+        str,
+        Field(description="Presigned S3 link, e.g. get_latest_report's `url`. The host must end in "
+                          "\"amazonaws.com\" and contain \"s3\" (anything else is a 400)."),
+    ],
+    file_name: Annotated[str, Field(description="Download filename to label the document, e.g. \"AAPL.pdf\".")],
+) -> DownloadedPdf:
     """Fetch a presigned S3 PDF URL server-side and return the document as base64.
 
     Use this to pull the actual PDF bytes for a presigned S3 link — e.g. the `url`
@@ -359,24 +411,21 @@ async def download_pdf_from_url(
     guard). NOTE: if you already have `get_latest_report`'s `report` field (the same PDF
     inline as base64), use that directly — there's no need to call this.
 
-    `url` is the presigned S3 link; `file_name` is the download filename to label the
-    document (e.g. "AAPL.pdf"). Returns
-    {"file_name": ..., "media_type": "application/pdf", "report": "<base64 pdf>"} —
-    decode `report` to read, render, or save the PDF.
+    Returns {"file_name": ..., "media_type": "application/pdf", "report": "<base64 pdf>"}
+    — decode `report` to read, render, or save the PDF.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
-    pdf = await _send(
+    # raw=True: bytes on success, _send's error dict otherwise (raised by _ok)
+    pdf = _ok(await _send(
         ctx, "POST", "/download-pdf-from-url",
         json={"url": url, "file_name": file_name}, raw=True,
+    ))
+    return DownloadedPdf(
+        file_name=file_name,
+        media_type="application/pdf",
+        report=base64.b64encode(pdf).decode("ascii"),
     )
-    if isinstance(pdf, dict):  # _send returned a structured error, pass it through
-        return pdf
-    return {
-        "file_name": file_name,
-        "media_type": "application/pdf",
-        "report": base64.b64encode(pdf).decode("ascii"),
-    }
 
 
 _TemplateType = Literal["add_on", "bespoke"]
@@ -385,10 +434,22 @@ _TemplateType = Literal["add_on", "bespoke"]
 @mcp.tool(annotations=ToolAnnotations(title="Draft PDF Template Previews", readOnlyHint=False, destructiveHint=False))
 async def draft_user_template(
     ctx: Context,
-    template: str,
-    template_type: _TemplateType,
-    anchor: Optional[str] = None,
-) -> Any:
+    template: Annotated[
+        str,
+        Field(description="The template as a complete HTML page in the intended style (max 200 KB; markdown is "
+                          "a 422). Its sample content is discarded at save — only structure and styling are kept."),
+    ],
+    template_type: Annotated[
+        _TemplateType,
+        Field(description="\"add_on\" restyles ONE section of the standard report and keeps the rest; "
+                          "\"bespoke\" drives the whole document."),
+    ],
+    anchor: Annotated[
+        Optional[str],
+        Field(description="REQUIRED for add_on: the section it applies to, matched as a substring against the "
+                          "document's block keys (e.g. \"technical\", \"financials\", \"ownership\"). Omit for bespoke."),
+    ] = None,
+) -> TemplateTask:
     """Render preview images of a user's PDF template so they can approve it BY LOOKING, before anything is saved.
 
     THE POINT: a user wants their research in THEIR format — their masthead, colours,
@@ -405,7 +466,8 @@ async def draft_user_template(
 
     THE FLOW:
       1. Author the HTML with the user (or take the page they hand you).
-      2. Call this. Show the user EVERY variant's `preview_urls` (render the images
+      2. Call this, then poll `get_task_status(task_id)` until SUCCESS. Show the user
+         EVERY variant's `preview_urls` (render the images
          inline where the client can; otherwise give the links) with its `name` and
          `rationale`, side by side.
       3. The user picks one -> `save_user_template(draft_id, variant_id)`. Never save
@@ -413,42 +475,37 @@ async def draft_user_template(
          `update_user_template`.
 
     `template_type`:
-      - "add_on"  — restyles ONE section of the standard report layout and keeps the
-        rest. `anchor` is REQUIRED: the section it applies to, matched as a substring
-        against the document's block keys (e.g. "technical", "financials",
-        "ownership"). The previews are rendered at the 360pt column width the block
+      - "add_on"  — the previews are rendered at the 360pt column width the block
         will occupy inside a report — anything wider is clipped, not scaled — and
         the treatments restyle it to sit inside the host document (its own page
         background, masthead and disclaimer are stripped).
       - "bespoke" — the template drives the whole document: page chrome, stylesheet
         and the pattern for every content kind, previewed as full pages.
 
-    HTML ONLY: a template is a page design, so the backend rejects markdown (422).
-
     TEMPLATE RULES (violations come back as a 422 with `detail.errors`):
       - Real CSS engine: grid, flexbox, gradients, absolute positioning all work.
         Add `break-inside: avoid` to a panel that must not split across pages.
       - Only `data:` URIs for images. External images, stylesheets and web fonts are
         BLOCKED; <script>, <link> and similar are stripped.
-      - Max 200 KB; must parse as HTML.
-      - Write the sample as a complete page in the intended style; its content is
-        discarded at save — only the structure and styling are kept.
+      - HTML only, max 200 KB; must parse as HTML.
 
-    Returns {"draft_id", "variants": [{"variant_id", "name", "rationale",
-    "preview_urls": [...], "preview_pages"}], "expires_in_seconds", "next_step",
-    "warnings"}. `preview_urls` are time-limited presigned PNG links, one per page.
+    Asynchronous: returns {"task_id", "status": "PENDING", "next_step"}. Poll
+    `get_task_status(task_id)`; the finished result is {"draft_id", "variants":
+    [{"variant_id", "name", "rationale", "preview_urls": [...], "preview_pages"}],
+    "expires_in_seconds", "next_step", "warnings"} (or {"error", "warnings"} when the
+    draft failed). `preview_urls` are time-limited presigned PNG links, one per page.
     Read `warnings`: a treatment that "changed too much" was dropped, and an empty
-    variant list (HTTP 502) means no usable adaptation survived — revise the
-    template rather than retrying the same one.
+    variant list means no usable adaptation survived — revise the template rather
+    than retrying the same one.
 
-    Runs a model pass plus a render, so expect several seconds. Requires auth (your
-    MCP client attaches the OAuth bearer automatically). Rate-limited 30/min.
+    Runs a model pass plus a render per treatment, so expect minutes. Requires auth
+    (your MCP client attaches the OAuth bearer automatically). Rate-limited 30/min.
     """
     if not (template or "").strip():
-        return {"error": "template is required — the HTML to preview."}
+        raise ToolError("template is required — the HTML to preview.")
     if template_type == "add_on" and not (anchor or "").strip():
-        return {"error": "anchor is required for an add_on template — the section it applies to (e.g. 'technical')."}
-    return await _send(
+        raise ToolError("anchor is required for an add_on template — the section it applies to (e.g. 'technical').")
+    return _ok(await _send(
         ctx, "POST", "/draft-user-template",
         json={
             "template": template,
@@ -456,18 +513,34 @@ async def draft_user_template(
             "template_format": "html",
             "anchor": anchor,
         },
-    )
+    ))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Save PDF Template", readOnlyHint=False, destructiveHint=False, idempotentHint=True))
 async def save_user_template(
     ctx: Context,
-    draft_id: Optional[str] = None,
-    variant_id: Optional[str] = None,
-    template: Optional[str] = None,
-    template_type: Optional[_TemplateType] = None,
-    anchor: Optional[str] = None,
-) -> Any:
+    draft_id: Annotated[
+        Optional[str],
+        Field(description="Signed-off path: the draft_id from draft_user_template's finished task. Pass with variant_id."),
+    ] = None,
+    variant_id: Annotated[
+        Optional[str],
+        Field(description="Signed-off path: the variant_id the user chose from the previews. Pass with draft_id."),
+    ] = None,
+    template: Annotated[
+        Optional[str],
+        Field(description="Direct path only: the HTML template (markdown is a 422). Omit on the signed-off path — "
+                          "the draft supplies it."),
+    ] = None,
+    template_type: Annotated[
+        Optional[_TemplateType],
+        Field(description="Direct path only (required there): \"add_on\" or \"bespoke\"."),
+    ] = None,
+    anchor: Annotated[
+        Optional[str],
+        Field(description="Direct path, add_on only (required there): the section it applies to, e.g. \"technical\"."),
+    ] = None,
+) -> TemplateTask:
     """Save the user's PDF format — one template per account, applied automatically to every PDF the backend renders for them from now on.
 
     STEP 2 OF 2 after `draft_user_template`. Two ways to call it:
@@ -495,26 +568,27 @@ async def save_user_template(
     filled in by hand, and no other call changes. When you compose a PDF yourself
     from Flexreport data, `get_user_template` returns the markup to lay it out in.
 
-    Returns {"status": "SAVED", "template_type", "anchor", "bytes", "patterns":
-    [content kinds the design styles], "tones": {positive | negative | neutral |
-    accent: css class}, "warnings"}. Tell the user which content kinds their design
-    styles. A warning "keeping the previously compiled blueprint" means the new
-    compile was rejected and the previous blueprint stays in force; the markup
-    itself is still saved. Validation failures are a 422 with `detail.errors`
-    listing each problem.
+    Asynchronous: returns {"task_id", "status": "PENDING", "next_step"}. Poll
+    `get_task_status(task_id)`; the finished result is {"status": "SAVED",
+    "template_type", "anchor", "bytes", "patterns": [content kinds the design styles],
+    "tones": {positive | negative | neutral | accent: css class}, "warnings"}. Tell
+    the user which content kinds their design styles. A warning "keeping the
+    previously compiled blueprint" means the new compile was rejected and the
+    previous blueprint stays in force; the markup itself is still saved. Validation
+    failures are a 422 with `detail.errors` listing each problem.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     Rate-limited 100/min.
     """
     if (draft_id is None) != (variant_id is None):
-        return {"error": "draft_id and variant_id go together — pass both (from draft_user_template) or neither."}
+        raise ToolError("draft_id and variant_id go together — pass both (from draft_user_template) or neither.")
     if draft_id is None:
         if not (template or "").strip():
-            return {"error": "Nothing to save — pass draft_id + variant_id for a reviewed draft, or the template text itself."}
+            raise ToolError("Nothing to save — pass draft_id + variant_id for a reviewed draft, or the template text itself.")
         if template_type is None:
-            return {"error": "template_type is required ('add_on' or 'bespoke') when saving a template directly."}
+            raise ToolError("template_type is required ('add_on' or 'bespoke') when saving a template directly.")
         if template_type == "add_on" and not (anchor or "").strip():
-            return {"error": "anchor is required for an add_on template — the section it applies to (e.g. 'technical')."}
+            raise ToolError("anchor is required for an add_on template — the section it applies to (e.g. 'technical').")
 
     # The backend body model requires `template` and `template_type` even on the
     # sign-off path, where the draft supplies both and overrides whatever is sent —
@@ -528,18 +602,33 @@ async def save_user_template(
     if draft_id is not None:
         payload["draft_id"] = draft_id
         payload["variant_id"] = str(variant_id)
-    return await _send(ctx, "POST", "/save-user-template", json=payload)
+    return _ok(await _send(ctx, "POST", "/save-user-template", json=payload))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Update Saved PDF Template", readOnlyHint=False, destructiveHint=False, idempotentHint=True))
 async def update_user_template(
     ctx: Context,
-    template: Optional[str] = None,
-    template_type: Optional[_TemplateType] = None,
-    anchor: Optional[str] = None,
-    draft_id: Optional[str] = None,
-    variant_id: Optional[str] = None,
-) -> Any:
+    template: Annotated[
+        Optional[str],
+        Field(description="New HTML template without previews (markdown is a 422). Omit to keep the stored one."),
+    ] = None,
+    template_type: Annotated[
+        Optional[_TemplateType],
+        Field(description="New type, \"add_on\" or \"bespoke\". Omit to keep the stored one."),
+    ] = None,
+    anchor: Annotated[
+        Optional[str],
+        Field(description="New add_on section, e.g. \"technical\". Omit to keep the stored one."),
+    ] = None,
+    draft_id: Annotated[
+        Optional[str],
+        Field(description="Visual change: the draft_id from draft_user_template's finished task. Pass with variant_id."),
+    ] = None,
+    variant_id: Annotated[
+        Optional[str],
+        Field(description="Visual change: the variant_id the user chose from the previews. Pass with draft_id."),
+    ] = None,
+) -> TemplateTask:
     """Change your saved PDF template — any field, or none to recompile it as stored.
 
     Complements `draft_user_template` (preview), `save_user_template` (create) and
@@ -561,7 +650,7 @@ async def update_user_template(
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
     if (draft_id is None) != (variant_id is None):
-        return {"error": "draft_id and variant_id go together — pass both (from draft_user_template) or neither."}
+        raise ToolError("draft_id and variant_id go together — pass both (from draft_user_template) or neither.")
     body: dict[str, Any] = {}
     if template is not None:
         body["template"] = template
@@ -573,11 +662,11 @@ async def update_user_template(
     if draft_id is not None:
         body["draft_id"] = draft_id
         body["variant_id"] = str(variant_id)
-    return await _send(ctx, "PUT", "/update-user-template", json=body)
+    return _ok(await _send(ctx, "PUT", "/update-user-template", json=body))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Saved PDF Template", readOnlyHint=True))
-async def get_user_template(ctx: Context) -> Any:
+async def get_user_template(ctx: Context) -> UserTemplateRecord:
     """Return the PDF template this user has saved, or a 404 if they have none.
 
     Call it to answer "what format am I on?", BEFORE `save_user_template` when a
@@ -600,11 +689,11 @@ async def get_user_template(ctx: Context) -> Any:
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     Rate-limited 100/min.
     """
-    return await _send(ctx, "GET", "/get-user-template")
+    return _ok(await _send(ctx, "GET", "/get-user-template"))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Delete Saved PDF Template", readOnlyHint=False, destructiveHint=True, idempotentHint=True))
-async def delete_user_template(ctx: Context) -> Any:
+async def delete_user_template(ctx: Context) -> DeleteTemplateResult:
     """Delete the user's saved PDF template so their PDFs go back to the standard layouts.
 
     Permanent and there is no history: re-creating the format means drafting and
@@ -617,4 +706,4 @@ async def delete_user_template(ctx: Context) -> Any:
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     Rate-limited 100/min.
     """
-    return await _send(ctx, "DELETE", "/delete-user-template")
+    return _ok(await _send(ctx, "DELETE", "/delete-user-template"))

@@ -3,13 +3,21 @@
 import asyncio
 import time
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 import situate as situate_mod
-from core import mcp, _send
+from core import mcp, _send, _ok
+from schemas.realtime_events import (
+    CompanyEventWebResult,
+    CompanySnapshotResult,
+    EventOntologyResult,
+    RealtimeEventsResult,
+    SituateResult,
+)
 
 
 _ONTOLOGY_CACHE: dict[str, tuple[float, Any]] = {}
@@ -45,10 +53,20 @@ async def _realtime_event_corpus(ctx: Context) -> list[dict[str, Any]]:
 @mcp.tool(annotations=ToolAnnotations(title="Situate: What Is Going On Right Now", readOnlyHint=True))
 async def situate(
     ctx: Context,
-    symbols: Optional[list[str]] = None,
-    window_days: Optional[int] = None,
-    question: Optional[str] = None,
-) -> Any:
+    symbols: Annotated[
+        Optional[list[str]],
+        Field(description="Tickers to situate (max 5; extras are dropped). Omit for the whole market."),
+    ] = None,
+    window_days: Annotated[
+        Optional[int],
+        Field(description="Event-web look-back in days (backend default 7, max 90).", ge=1, le=90),
+    ] = None,
+    question: Annotated[
+        Optional[str],
+        Field(description="The user's question VERBATIM; keyword-matched to the realtime event types it names, "
+                          "which decides where the plan starts."),
+    ] = None,
+) -> SituateResult:
     """THE FIRST CALL. What is going on right now — for the market, or for the named symbols — and a ready-made PLAN of the tool calls that answer the user's question. Call it before any other flexreport tool on anything about a company, an event, or "now".
 
     ===> Call this FIRST for: "catch me up on X", "what happened / why", "anything
@@ -170,12 +188,22 @@ async def situate(
 @mcp.tool(annotations=ToolAnnotations(title="List Real-Time Market Events", readOnlyHint=True))
 async def list_realtime_events(
     ctx: Context,
-    event_type: str,
-    tickers: Optional[list[str]] = None,
-    sector: Optional[list[str]] = None,
-    industry: Optional[list[str]] = None,
-    market_cap: Optional[list[str]] = None,
-) -> Any:
+    event_type: Annotated[
+        str,
+        Field(description="REQUIRED realtime event type from list_options(\"event_types\"), e.g. \"eps_update\", "
+                          "\"8k_release\", \"ir_publication\"."),
+    ],
+    tickers: Annotated[
+        Optional[list[str]],
+        Field(description="Narrow to these tickers; always set on follow-up calls (an unfiltered call re-pulls the whole cache)."),
+    ] = None,
+    sector: Annotated[Optional[list[str]], Field(description="Sector values from list_options(\"sectors\").")] = None,
+    industry: Annotated[Optional[list[str]], Field(description="Industry values from list_sub_industries([...]).")] = None,
+    market_cap: Annotated[
+        Optional[list[str]],
+        Field(description="Market-cap buckets, e.g. [\"Large-cap\", \"Mega-cap\"]."),
+    ] = None,
+) -> RealtimeEventsResult:
     """Pull live market events from the backend's Redis-backed cache (12h TTL).
 
     ===> Call `situate(...)` FIRST (symbols=[...] for named companies, none for the
@@ -196,10 +224,8 @@ async def list_realtime_events(
     answers most questions; two covers a full earnings cycle. An unfiltered
     follow-up call re-pulls the whole cache.
 
-    Optionally narrow results by `tickers`, `sector`, `industry`, or `market_cap`
-    (e.g. market_cap=["Large-cap","Mega-cap"]). Returns a list of event objects.
-    An EMPTY list means the cache is cold for that event type (12h TTL), not
-    that nothing happened.
+    Returns `events`, a list of event objects (keys vary by type). An EMPTY list
+    means the cache is cold for that event type (12h TTL), not that nothing happened.
 
     A material event here (eps_update, eps_release, 8k_release, financials_release,
     ir_publication, transcript_update) means a report plan was saved for the symbol:
@@ -217,11 +243,15 @@ async def list_realtime_events(
         body["industry"] = industry
     if market_cap:
         body["market_cap"] = market_cap
-    return await _send(ctx, "POST", "/get-realtime-events", json=body)
+    events = _ok(await _send(ctx, "POST", "/get-realtime-events", json=body))
+    return RealtimeEventsResult(events=events)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Company Snapshot", readOnlyHint=True))
-async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
+async def get_company_snapshot(
+    ctx: Context,
+    symbol: Annotated[str, Field(description="Covered ticker, e.g. \"AAPL\".")],
+) -> CompanySnapshotResult:
     """Fetch a structured, POINT-IN-TIME company snapshot — no report generation needed.
 
     Returns thesis/bull/bear, financial overview (Piotroski, valuation signal),
@@ -265,19 +295,26 @@ async def get_company_snapshot(ctx: Context, symbol: str) -> Any:
     explains it may sit well outside any window. Absence of a matching event is
     NOT proof the snapshot moved for no reason.
     """
-    return await _send(
+    return _ok(await _send(
         ctx, "GET", "/get-company-snapshot",
         params={"symbol": symbol}, require_auth=False,
-    )
+    ))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Company Event Web", readOnlyHint=True))
 async def get_company_event_web(
     ctx: Context,
-    symbol: str,
-    window_days: Optional[int] = None,
-    max_nodes: Optional[int] = None,
-) -> Any:
+    symbol: Annotated[str, Field(description="Covered ticker, e.g. \"WM\".")],
+    window_days: Annotated[
+        Optional[int],
+        Field(description="Look-back in days (default 7, max 90). Widen before calling a snapshot move unexplained.",
+              ge=1, le=90),
+    ] = None,
+    max_nodes: Annotated[
+        Optional[int],
+        Field(description="Node cap (default 40, max 200).", ge=1, le=200),
+    ] = None,
+) -> CompanyEventWebResult:
     """Fetch the connected WEB of what recently HAPPENED to a company — the WHY behind its snapshot, and a time-ordered graph to CHAIN your next calls off.
 
     ===> `situate(symbols=[symbol])` already returns this web (newest 12 nodes) PLUS
@@ -364,8 +401,7 @@ async def get_company_event_web(
       4. Nothing here is a full payload — a headline is a pointer, never the content.
          Do not quote a headline as if it were the event.
 
-    `window_days` (default 7, max 90) and `max_nodes` (default 40, max 200) widen the
-    look-back. Beyond the node cap, edges are capped per node (~3 same_chain_run, ~3
+    `window_days` and `max_nodes` widen the look-back. Beyond the node cap, edges are capped per node (~3 same_chain_run, ~3
     co_occurrence) and `market_context` — market-wide macro/economic-calendar nodes
     that carry no ticker and so attach to no symbol — is capped at 5. A MISSING edge
     is therefore not evidence that two things are unrelated.
@@ -398,20 +434,32 @@ async def get_company_event_web(
         params["window_days"] = window_days
     if max_nodes:
         params["max_nodes"] = max_nodes
-    return await _send(
+    return _ok(await _send(
         ctx, "GET", "/get-company-event-web",
         params=params, require_auth=False,
-    )
+    ))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Event Ontology", readOnlyHint=True))
 async def get_event_ontology(
     ctx: Context,
-    event_type: Optional[str] = None,
-    family: Optional[str] = None,
-    relation: Optional[str] = None,
-    format: Literal["cards", "triples"] = "cards",
-) -> Any:
+    event_type: Annotated[
+        Optional[str],
+        Field(description="One event type, e.g. \"eps_update\" (a web node's `type`). Pass exactly one filter."),
+    ] = None,
+    family: Annotated[
+        Optional[str],
+        Field(description="One family, e.g. \"earnings\" (a web node's `family`)."),
+    ] = None,
+    relation: Annotated[
+        Optional[str],
+        Field(description="One table/view, e.g. \"eod_stock_prices\" (a web node's `relation`)."),
+    ] = None,
+    format: Annotated[
+        Literal["cards", "triples"],
+        Field(description="cards (grouped, default) or triples (raw subject-predicate-object rows)."),
+    ] = "cards",
+) -> EventOntologyResult:
     """The platform's event ONTOLOGY — what an event TYPE means for everything else. Call it FIRST on any real-time, single-company, or event-driven request; it is the map the other calls are planned from.
 
     ===> `situate(...)` composes this with the event web and the cache state and
@@ -488,4 +536,4 @@ async def get_event_ontology(
         params["family"] = family
     if relation:
         params["relation"] = relation
-    return await _send(ctx, "GET", "/get-event-ontology", params=params, require_auth=False)
+    return _ok(await _send(ctx, "GET", "/get-event-ontology", params=params, require_auth=False))
