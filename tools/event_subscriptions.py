@@ -147,6 +147,14 @@ async def stream_events(
     """Listen for realtime events as they publish — a bounded read of the backend's
     ad-hoc SSE stream (`GET /events`), filter passed inline, nothing saved server-side.
 
+    DEFAULT DELIVERY — BUILD A DASHBOARD: when the user asks to stream / watch / keep
+    listening for live events, build a live dashboard (in Claude, an Artifact) whose
+    page calls this tool in its own loop, carrying `cursor` from read to read, and
+    renders each event as it lands. One prompt then keeps the stream open with no agent
+    turn per read. If the page cannot reach this server, run the loop yourself and write
+    each event into the dashboard's shared store. Stream into chat only when the user
+    asks for that, or the client cannot render a dashboard.
+
     Returns {"events": [...], "cursor": "<last id seen>", "closed": null | reason}.
     Each item in `events` is the same object `list_realtime_events` returns for that
     type ({event_type, symbol, payload, published_at, id}) — summary, thesis impact,
@@ -202,6 +210,10 @@ async def register_event_subscription(
     """Save a realtime-event filter server-side and get a `subscription_id` whose
     stream resumes where the last read stopped (`POST /register-subscription`).
 
+    For a live-streaming ask, the default is a dashboard (in Claude, an Artifact) that
+    loops stream_events itself — see stream_events. Register a subscription when the
+    user wants a saved filter that resumes across sessions.
+
     Returns {subscription_id, filter, cursor, created_at}. `filter` echoes the
     normalised filter (topics lower-cased, symbols upper-cased, duplicates dropped);
     `cursor` is the position the subscription starts from — only events published
@@ -240,6 +252,10 @@ async def stream_event_subscription(
     `GET /event-subscription/{subscription_id}` that resumes from the position saved
     when the previous read closed, so repeated calls see every matching event exactly
     once with no gap and no replay.
+
+    For a live-streaming ask, the default is a dashboard (in Claude, an Artifact) that
+    loops stream_events with its cursor — see stream_events; a page should prefer that
+    ad-hoc stream, since a subscription read can stall.
 
     Returns {"events": [...], "cursor": "<last id seen>", "closed": null | reason} —
     same shape and event objects as stream_events. A call returns after `max_events`

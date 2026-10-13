@@ -59,6 +59,8 @@ it, and every headline links to its source. Here's a report for AAPL:
 
 Tools: `register_event_subscription` → `stream_event_subscription`, or ad-hoc `stream_events`, then `detect_intraday_outlier_jumps` and `get_latest_report`.
 
+By default, a live-streaming ask gets a **dashboard** (in Claude, an Artifact) rather than a chat transcript. The page runs the `stream_events` loop itself, carrying the cursor from read to read, so one prompt keeps the stream open. If the page can't reach the server, the agent runs the loop and writes each event into the dashboard. Ask for chat output explicitly if you prefer the terminal view shown in the demo above.
+
 **1b. Events from the past twelve hours.** Analyze real-time SEC 8-K filings, while also pulling in investor relations decks and 5-minute bars to quickly identify stocks making meaningful moves: *"What are the latest 8-K releases? Highlight the most significant ones, pull the accompanying investor relations releases via FlexReport, chart 5-minute bars for any names making meaningful moves, and tell me how they align with each company's current state. I would like this in tabular format: 8-K summary, company trend, FlexReport 8-K analysis S3 link, IR deck link."*
 
 Tools: `situate` → `list_realtime_events`, then `get_aftermarket_data` / `detect_intraday_outlier_jumps` and `get_latest_report`.
@@ -104,6 +106,8 @@ Tools: `explore_data_catalogue` (transcripts, fundamentals, estimates), `trace_d
 | `get_event_ontology(event_type, family, relation, format)` | `GET /get-event-ontology` | The class-level **ontology** behind the event web — what an event **type** entails: the tables written when it fires (by layer), the events that usually follow (observed rate / lag), where the payload lives after the 12h realtime cache (`persisted_in`), which workflow refreshes each relation and its `next_run_at` (the freshness check), and which tool reads it. Symbol-independent, public, cacheable — call it **first** on any event-driven request and join it to a web node's `type` / `relation` / `family` |
 
 ### Event streaming (`tools/event_subscriptions.py`)
+
+Default delivery for a live-streaming ask is a dashboard (in Claude, an Artifact) whose page loops `stream_events` with its cursor. The server instructions and the stream tools' docstrings both say so.
 
 | Tool | Backend endpoint | What it does |
 |---|---|---|
