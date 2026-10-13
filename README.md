@@ -1,6 +1,8 @@
 # flexreport-mcp
 
-[![smithery badge](https://smithery.ai/badge/support-or61/flexreport-finance)](https://smithery.ai/servers/support-or61/flexreport-finance)
+<!-- Smithery's own badge image (https://smithery.ai/badge/support-or61/flexreport-finance) returns a 500
+     for every server as of 2026-10-13; restore it once that endpoint works again. -->
+[![smithery badge](https://img.shields.io/badge/smithery-flexreport--finance-orange)](https://smithery.ai/servers/support-or61/flexreport-finance)
 
 A standalone **MCP microservice** that exposes the [FlexReport](https://app.flexreportfinapi.com/api-docs)
 equity backend's **live events**, **research-report artifacts**, and **database of
