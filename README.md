@@ -1,5 +1,7 @@
 # flexreport-mcp
 
+[![smithery badge](https://smithery.ai/badge/support-or61/flexreport-finance)](https://smithery.ai/servers/support-or61/flexreport-finance)
+
 A standalone **MCP microservice** that exposes the [FlexReport](https://app.flexreportfinapi.com/api-docs)
 equity backend's **live events**, **research-report artifacts**, and **database of
 750M+ datapoints** as on-demand tools for Claude (and any MCP client).
