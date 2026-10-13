@@ -110,7 +110,12 @@ async def predict_earnings_move(
     symbols: list[str],
 )-> Any:
     """
-    Predict the magnitude of a stock's move, post-earnings announcement. Returns a list of possibilities, modelling the magnitude under each scenario e.g. if stock beats and raises guidance then expect a 6% magnitude move.
+    Predict how big a stock's move will be when it next reports earnings. For each symbol, returns
+    its next earnings date (today or later) and `expected_move`: the expected absolute move of the
+    reaction session as a log return (0.05 is about 5%; size only, no direction). For context,
+    `hist_move_mean` / `hist_move_n` give the stock's own average reaction over its past reports and
+    how many reports that covers. Symbols with no scheduled report come back in
+    `no_upcoming_earnings_symbols`; uncovered tickers in `not_supported_symbols`.
     """
     return await _send(
         ctx, "POST", "/predict-earnings-announcement-move", json={"symbols" : symbols }
