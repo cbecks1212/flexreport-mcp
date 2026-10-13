@@ -1,11 +1,20 @@
 """Utility tools: async task polling, parameter-option catalogues, symbol onboarding, billing."""
 
-from typing import Any, Literal, Optional, get_args
+from typing import Annotated, Literal, Optional, get_args
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
-from core import mcp, _send
+from core import mcp, _send, _ok
+from schemas.utility import (
+    BillingLinkResult,
+    ListOptionsResult,
+    OnboardAccepted,
+    PlanUsage,
+    SubIndustriesResult,
+    TaskStatusResult,
+)
 
 
 _OPTION_ENDPOINTS = {
@@ -60,27 +69,42 @@ assert set(get_args(_OptionKind)) == set(_OPTION_ENDPOINTS)
 assert set(_OPTION_QUERY_PARAMS) <= set(_OPTION_ENDPOINTS)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Get Async Task Status", readOnlyHint=True))
-async def get_task_status(ctx: Context, task_id: str) -> Any:
+@mcp.tool(
+    annotations=ToolAnnotations(title="Get Async Task Status", readOnlyHint=True),
+    # structured_output=False: results can be very large (base64 PDFs, task results
+    # like the 127 MB one behind the 2026-09-10 OOM), and structured output would
+    # send them twice (text + structuredContent). The model is still the documented shape.
+    structured_output=False,
+)
+async def get_task_status(
+    ctx: Context,
+    task_id: Annotated[str, Field(description="The task_id an async tool returned.")],
+) -> TaskStatusResult:
     """Poll the status of an async job (a get_latest_report `rendering` task, generate_report_for_stock, generate_research_report, explore_data_catalogue, explore_data_coverage, screen_stocks, ...).
 
     Returns {"task_id": ..., "status": ..., "result": ...}. `status` is one of
     PENDING, SUCCESS, FAILURE, RETRY. `result` is populated once status is SUCCESS.
     """
-    return await _send(
+    return _ok(await _send(
         ctx, "GET", "/task-status",
         params={"task_id": task_id}, require_auth=False,
-    )
+    ))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List Valid Parameter Options", readOnlyHint=True))
 async def list_options(
     ctx: Context,
-    kind: _OptionKind,
-    ticker: Optional[str] = None,
-    q: Optional[str] = None,
-    cik: Optional[str] = None,
-) -> Any:
+    kind: Annotated[_OptionKind, Field(description="Which catalog to list; see the kinds below.")],
+    ticker: Annotated[
+        Optional[str], Field(description="Filer ticker, e.g. \"AAPL\". Required for as_reported_items and revenue_segments.")
+    ] = None,
+    q: Annotated[
+        Optional[str], Field(description="Manager name fragment, e.g. \"berkshire\" (institutional_managers).")
+    ] = None,
+    cik: Annotated[
+        Optional[str], Field(description="SEC CIK, any width, e.g. \"1067983\" (institutional_managers).")
+    ] = None,
+) -> ListOptionsResult:
     """Enumerate the valid values for a parameter, straight from the backend.
 
     Call this BEFORE guessing a parameter value. `kind` selects which catalog; three
@@ -133,32 +157,39 @@ async def list_options(
                                         this list, only in "tickers" (an even larger
                                         payload)
 
-    Authoritative and never stale: it reads the backend's live config, not a
-    hardcoded list. Public — no auth required.
+    Returns `options` (the values for that kind). Authoritative and never stale: it
+    reads the backend's live config, not a hardcoded list. Public — no auth required.
     """
     wanted = _OPTION_QUERY_PARAMS.get(kind, ())
     given = {"ticker": ticker, "q": q, "cik": cik}
     params = {name: given[name] for name in wanted if given[name]}
     if wanted and not params:
-        return {"error": f'list_options("{kind}") needs {" and/or ".join(wanted)} — '
-                         "pass it as a keyword argument."}
-    return await _send(
+        _ok({"error": f'list_options("{kind}") needs {" and/or ".join(wanted)} — '
+                      "pass it as a keyword argument."})
+    options = _ok(await _send(
         ctx, "GET", _OPTION_ENDPOINTS[kind],
         params=params or None, require_auth=False,
-    )
+    ))
+    return ListOptionsResult(kind=kind, options=options)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List Sub-Industries", readOnlyHint=True))
-async def list_sub_industries(ctx: Context, sectors: list[str]) -> Any:
+async def list_sub_industries(
+    ctx: Context,
+    sectors: Annotated[
+        list[str], Field(description="Sector values from list_options(\"sectors\"), e.g. [\"Technology\"].", min_length=1)
+    ],
+) -> SubIndustriesResult:
     """List the sub-industries within one or more sectors.
 
-    `sectors` must be values from `list_options("sectors")`. Returns the
-    distinct industries used to narrow `list_realtime_events(industry=[...])`.
+    Returns `industries`, the distinct industries used to narrow
+    `list_realtime_events(industry=[...])`.
     """
-    return await _send(
+    industries = _ok(await _send(
         ctx, "GET", "/get-sub-industries",
         params={"sector": sectors}, require_auth=False,
-    )
+    ))
+    return SubIndustriesResult(industries=industries)
 
 
 # --- User PDF templates ----------------------------------------------------
@@ -187,8 +218,8 @@ async def list_sub_industries(ctx: Context, sectors: list[str]) -> Any:
 @mcp.tool(annotations=ToolAnnotations(title="Onboard New Symbol", readOnlyHint=False, destructiveHint=False))
 async def onboard_symbol(
     ctx: Context,
-    symbol: str,
-) -> Any:
+    symbol: Annotated[str, Field(description="The ticker to onboard, e.g. \"IMCR\".")],
+) -> OnboardAccepted:
     """Request onboarding of a NOT-yet-covered ticker (mutating, authenticated).
 
     Kicks off a 30-60 min backend workflow and emails the authenticated user when
@@ -198,10 +229,10 @@ async def onboard_symbol(
 
     Returns {"task_id": ..., "status": "PENDING"}.
     """
-    return await _send(
+    return _ok(await _send(
         ctx, "POST", "/onboard-symbol",
         params={"symbol": symbol},
-    )
+    ))
 
 
 # --- Billing / plan upgrades ----------------------------------------------
@@ -210,14 +241,14 @@ async def onboard_symbol(
 # forwarded bearer identifies the user, so neither tool takes any arguments.
 
 @mcp.tool(annotations=ToolAnnotations(title="Upgrade Plan", readOnlyHint=False, destructiveHint=False))
-async def upgrade_plan(ctx: Context) -> str:
+async def upgrade_plan(ctx: Context) -> BillingLinkResult:
     """Get a secure link for the user to upgrade or change their Flexreport Finance plan (e.g. to raise their request limit). Returns a checkout link — the user completes payment in their browser. Call this whenever the user asks to upgrade, subscribe, pay for, or change their plan, or when they've hit a usage/quota limit."""
     # /payment/upgrade-link is quota-exempt, so this is safe even after a 429.
     # _send forwards the caller's inbound bearer token.
     data = await _send(ctx, "GET", "/payment/upgrade-link")
     if not isinstance(data, dict) or data.get("error") or not data.get("url"):
-        return ("Sorry, I couldn't generate an upgrade link just now. "
-                "Please try again in a moment.")
+        return BillingLinkResult(message="Sorry, I couldn't generate an upgrade link just now. "
+                                         "Please try again in a moment.")
 
     url = data["url"]
     u = data.get("usage") or {}
@@ -232,20 +263,22 @@ async def upgrade_plan(ctx: Context) -> str:
         "Open the link to choose a plan and complete checkout. Your new limit "
         "activates as soon as payment succeeds — no need to re-authenticate here."
     )
-    return "\n\n".join(lines)
+    return BillingLinkResult(
+        message="\n\n".join(lines), url=url, usage=PlanUsage(**u) if u else None
+    )
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Manage Billing", readOnlyHint=False, destructiveHint=False))
-async def manage_billing(ctx: Context) -> str:
+async def manage_billing(ctx: Context) -> BillingLinkResult:
     """Get a link to the Stripe billing portal where the user can view invoices, update their card, or cancel their subscription. Use when the user asks to manage, change, or cancel their billing/subscription."""
     # _send forwards the caller's inbound bearer token.
     data = await _send(ctx, "GET", "/payment/portal-link")
     if isinstance(data, dict) and data.get("url") and not data.get("error"):
-        return f"👉 [Manage your billing]({data['url']})"
+        return BillingLinkResult(message=f"👉 [Manage your billing]({data['url']})", url=data["url"])
 
     err = data.get("error", "") if isinstance(data, dict) else ""
     if "HTTP 404" in err:  # no active subscription yet
-        return ("You don't have an active paid subscription yet. "
-                "Use upgrade_plan to subscribe.")
-    return ("Sorry, I couldn't open the billing portal just now. "
-            "Please try again in a moment.")
+        return BillingLinkResult(message="You don't have an active paid subscription yet. "
+                                         "Use upgrade_plan to subscribe.")
+    return BillingLinkResult(message="Sorry, I couldn't open the billing portal just now. "
+                                     "Please try again in a moment.")

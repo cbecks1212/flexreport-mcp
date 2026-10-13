@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY client.py core.py server.py situate.py auth_verifier.py instructions.json ./
 COPY tools/ ./tools/
+COPY schemas/ ./schemas/
 
 # Streamable-http transport. Override via env at runtime.
 ENV MCP_HOST=0.0.0.0 \

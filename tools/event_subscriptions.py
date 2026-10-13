@@ -11,14 +11,21 @@ cursors all live in the API.
 import asyncio
 import json
 import time
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 import httpx
 from mcp.server.fastmcp import Context
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from client import MissingAuthError, auth_headers, get_client
-from core import mcp, _inbound_request, _send
+from core import mcp, _inbound_request, _send, _ok
+from schemas.event_subscriptions import (
+    DeleteSubscriptionResult,
+    RegisterSubscriptionResult,
+    StreamReadResult,
+)
 
 # The backend emits a heartbeat every <= 8 s on an idle stream and the ALB idle timeout
 # is 60 s; a read timeout comfortably above the heartbeat keeps a quiet stream open
@@ -29,6 +36,35 @@ _SSE_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
 # must return before the 60 s idle timeout cuts it off.
 _MAX_WAIT_CAP_S = 55
 _MAX_EVENTS_CAP = 200
+
+# Parameter types shared by the two stream tools. Out-of-range values are clamped
+# in `_read_sse`, not rejected, so the caps are documented rather than enforced.
+_Cursor = Annotated[
+    Optional[str],
+    Field(description="The `cursor` returned by the previous read; resume after it. Omit to start at now."),
+]
+_MaxEvents = Annotated[
+    int,
+    Field(description=f"Return after this many matched events (clamped to 1-{_MAX_EVENTS_CAP})."),
+]
+_MaxWait = Annotated[
+    int,
+    Field(description=f"Return after this many seconds even if fewer events arrived (clamped to 1-{_MAX_WAIT_CAP_S})."),
+]
+_Topics = Annotated[
+    Optional[list[str]],
+    Field(description="Event types or families from list_options(\"event_types\") (e.g. \"eps_update\", "
+                      "\"earnings\"), plus the stream-only \"report_plan\"; case-insensitive. Omit for every topic."),
+]
+_Symbols = Annotated[
+    Optional[list[str]],
+    Field(description="Tickers to listen for (13f_* filer events carry the filer's CIK in the symbol slot). "
+                      "Omit for every symbol."),
+]
+_SubscriptionId = Annotated[
+    str,
+    Field(description="The `subscription_id` returned by register_event_subscription.", min_length=1),
+]
 
 
 def _parse_frame(lines: list[str]) -> dict[str, Any]:
@@ -62,7 +98,7 @@ async def _read_sse(
     Returns {"events": [...], "cursor": <last id seen, matched or not>, "closed": None | reason,
     "elapsed_seconds": n}. `cursor` falls back to the one passed in when no frame carried an id,
     so the agent can always feed it straight back into the next call. Errors come back as
-    {"error": ...} like every other tool.
+    `_send`'s {"error", "detail"} dict, so callers wrap the result in `_ok(...)`.
     """
     max_events = max(1, min(int(max_events), _MAX_EVENTS_CAP))
     max_wait_seconds = max(1, min(int(max_wait_seconds), _MAX_WAIT_CAP_S))
@@ -138,12 +174,12 @@ async def _read_sse(
 @mcp.tool(annotations=ToolAnnotations(title="Stream Realtime Events (Ad-Hoc)", readOnlyHint=True))
 async def stream_events(
     ctx: Context,
-    topics: Optional[list[str]] = None,
-    symbols: Optional[list[str]] = None,
-    cursor: Optional[str] = None,
-    max_events: int = 20,
-    max_wait_seconds: int = 30,
-) -> Any:
+    topics: _Topics = None,
+    symbols: _Symbols = None,
+    cursor: _Cursor = None,
+    max_events: _MaxEvents = 20,
+    max_wait_seconds: _MaxWait = 30,
+) -> StreamReadResult:
     """Listen for realtime events as they publish — a bounded read of the backend's
     ad-hoc SSE stream (`GET /events`), filter passed inline, nothing saved server-side.
 
@@ -155,8 +191,8 @@ async def stream_events(
     each event into the dashboard's shared store. Stream into chat only when the user
     asks for that, or the client cannot render a dashboard.
 
-    Returns {"events": [...], "cursor": "<last id seen>", "closed": null | reason}.
-    Each item in `events` is the same object `list_realtime_events` returns for that
+    Returns {"events": [...], "cursor": "<last id seen>", "closed": null | reason,
+    "elapsed_seconds": n}. Each item in `events` is the same object `list_realtime_events` returns for that
     type ({event_type, symbol, payload, published_at, id}) — summary, thesis impact,
     significant changes, citations — the moment it publishes, no polling of the 12h
     cache. There is NO PDF link on an event: for the research, POST the symbol to
@@ -195,18 +231,18 @@ async def stream_events(
         params["symbols"] = [s.strip() for s in symbols if s and s.strip()]
     if cursor:
         params["cursor"] = cursor
-    return await _read_sse(
+    return _ok(await _read_sse(
         ctx, "/events", params,
         cursor=cursor, max_events=max_events, max_wait_seconds=max_wait_seconds,
-    )
+    ))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Register Event Subscription", readOnlyHint=False, destructiveHint=False))
 async def register_event_subscription(
     ctx: Context,
-    topics: Optional[list[str]] = None,
-    symbols: Optional[list[str]] = None,
-) -> Any:
+    topics: _Topics = None,
+    symbols: _Symbols = None,
+) -> RegisterSubscriptionResult:
     """Save a realtime-event filter server-side and get a `subscription_id` whose
     stream resumes where the last read stopped (`POST /register-subscription`).
 
@@ -237,17 +273,21 @@ async def register_event_subscription(
         body["topics"] = [t.strip() for t in topics if t and t.strip()]
     if symbols:
         body["symbols"] = [s.strip() for s in symbols if s and s.strip()]
-    return await _send(ctx, "POST", "/register-subscription", json=body)
+    return _ok(await _send(ctx, "POST", "/register-subscription", json=body))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Stream Event Subscription (Resumable)", readOnlyHint=True))
 async def stream_event_subscription(
     ctx: Context,
-    subscription_id: str,
-    cursor: Optional[str] = None,
-    max_events: int = 20,
-    max_wait_seconds: int = 30,
-) -> Any:
+    subscription_id: _SubscriptionId,
+    cursor: Annotated[
+        Optional[str],
+        Field(description="Override the saved position for this one connection (not persisted). "
+                          "Omit to resume where the last read stopped."),
+    ] = None,
+    max_events: _MaxEvents = 20,
+    max_wait_seconds: _MaxWait = 30,
+) -> StreamReadResult:
     """Read the next events on a saved subscription — a bounded read of
     `GET /event-subscription/{subscription_id}` that resumes from the position saved
     when the previous read closed, so repeated calls see every matching event exactly
@@ -257,8 +297,8 @@ async def stream_event_subscription(
     loops stream_events with its cursor — see stream_events; a page should prefer that
     ad-hoc stream, since a subscription read can stall.
 
-    Returns {"events": [...], "cursor": "<last id seen>", "closed": null | reason} —
-    same shape and event objects as stream_events. A call returns after `max_events`
+    Returns {"events": [...], "cursor": "<last id seen>", "closed": null | reason,
+    "elapsed_seconds": n} — same shape and event objects as stream_events. A call returns after `max_events`
     matched events or `max_wait_seconds` (cap 55 s); call again to keep listening. The
     API saves the cursor when this read closes the connection, so the next call resumes
     correctly WITHOUT passing `cursor`. Pass `cursor` only to override the saved
@@ -280,18 +320,18 @@ async def stream_event_subscription(
     """
     sid = (subscription_id or "").strip()
     if not sid:
-        return {"error": "`subscription_id` is required — the id returned by register_event_subscription."}
+        raise ToolError("`subscription_id` is required — the id returned by register_event_subscription.")
     params: dict[str, Any] = {}
     if cursor:
         params["cursor"] = cursor
-    return await _read_sse(
+    return _ok(await _read_sse(
         ctx, f"/event-subscription/{sid}", params,
         cursor=cursor, max_events=max_events, max_wait_seconds=max_wait_seconds,
-    )
+    ))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Delete Event Subscription", readOnlyHint=False, destructiveHint=True, idempotentHint=True))
-async def delete_event_subscription(ctx: Context, subscription_id: str) -> Any:
+async def delete_event_subscription(ctx: Context, subscription_id: _SubscriptionId) -> DeleteSubscriptionResult:
     """Remove a saved event subscription (`DELETE /event-subscription/{subscription_id}`).
 
     Returns {"status": "DELETED", "subscription_id": ...}; any stream still open on it
@@ -304,5 +344,5 @@ async def delete_event_subscription(ctx: Context, subscription_id: str) -> Any:
     """
     sid = (subscription_id or "").strip()
     if not sid:
-        return {"error": "`subscription_id` is required — the id returned by register_event_subscription."}
-    return await _send(ctx, "DELETE", f"/event-subscription/{sid}")
+        raise ToolError("`subscription_id` is required — the id returned by register_event_subscription.")
+    return _ok(await _send(ctx, "DELETE", f"/event-subscription/{sid}"))

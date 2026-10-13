@@ -3,7 +3,9 @@ instructions, and `_send`, the one function that forwards a call to the backend.
 
 Tool modules under `tools/` do `from core import mcp, _send` and register with
 `@mcp.tool(...)`; `server.py` imports the package (which registers everything),
-adds the health route and runs the transport.
+adds the health route and runs the transport. A tool that returns a `schemas/`
+model wraps its backend call in `_ok(...)` so errors raise instead of failing
+output-schema validation.
 """
 
 import json
@@ -13,6 +15,7 @@ from typing import Any
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from client import MissingAuthError, auth_headers, get_client
 
@@ -114,3 +117,20 @@ async def _send(
         return resp.json()
     except Exception:
         return {"error": "Backend returned a non-JSON response", "detail": resp.text}
+
+
+def _ok(resp: Any) -> Any:
+    """Raise `_send`'s error dict as a ToolError; pass any other response through.
+
+    A tool with an output schema (a `schemas/` model as its return type) has every
+    successful result validated against that schema, so the `{"error", "detail"}`
+    dict `_send` returns would fail validation. Raised, it becomes an isError result,
+    which the SDK does not validate, and the agent still reads the backend detail.
+    """
+    if isinstance(resp, dict) and "error" in resp and set(resp) <= {"error", "detail"}:
+        msg = str(resp["error"])
+        if resp.get("detail") not in (None, ""):
+            detail = resp["detail"] if isinstance(resp["detail"], str) else json.dumps(resp["detail"], default=str)
+            msg += f": {detail[:2000]}"
+        raise ToolError(msg)
+    return resp
