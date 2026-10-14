@@ -15,3 +15,6 @@ deploy/
 reports/
 
 tests/
+
+# MCP Registry metadata (published copy lives in the registry)
+server.json
