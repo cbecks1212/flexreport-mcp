@@ -3,7 +3,6 @@
 <!-- Smithery's own badge image (https://smithery.ai/badge/support-or61/flexreport-finance) returns a 500
      for every server as of 2026-10-13; restore it once that endpoint works again. -->
 [![smithery badge](https://img.shields.io/badge/smithery-flexreport--finance-orange)](https://smithery.ai/servers/support-or61/flexreport-finance)
-
 [![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/cbecks1212/flexreport-mcp)
 
 A standalone **MCP microservice** that exposes the [FlexReport](https://app.flexreportfinapi.com/api-docs)
