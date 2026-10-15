@@ -159,7 +159,7 @@ Default delivery for a live-streaming ask is a dashboard (in Claude, an Artifact
 | `get_aftermarket_data(symbols, start_datetime, end_datetime)` | `POST /get-aftermarket-data` | Query **stored** after-hours 15-minute bars (open/high/low/close/volume, 16:00-20:00 ET) for symbols over an ET datetime range; rows ordered symbol, bar time DESC (defaults to today, authed, 300/min) |
 | `predict_earnings_move(symbols)` | `POST /predict-earnings-announcement-move` | Expected size of each stock's move on its next earnings reaction (e.g. NFLX `expected_move` 0.10, about 10%), next to its own historical average |
 | `list_earnings_announcements(start_date, end_date, symbols, industry, sector, market_cap)` | `POST /list-upcoming-earnings-announcements` | Scheduled earnings announcements in a date window (both default to today), covered names only; `sector` / `industry` / `market_cap` validated server-side (422 on a bad value) |
-| `is_market_open(exchange)` | `GET /is-market-open` | Is an exchange open now (case-sensitive code, default `NYSE`) — routes between `detect_intraday_outlier_jumps` (open) and `get_aftermarket_data` (closed). Public |
+| `is_market_open(exchange)` | `GET /is-market-open` | Is an exchange open now — returns a single `is_open` boolean (exchange code, default `NYSE`) — routes between `detect_intraday_outlier_jumps` (open) and `get_aftermarket_data` (closed). Public |
 
 ### Screening, portfolios & strategies (`tools/strategies.py`)
 

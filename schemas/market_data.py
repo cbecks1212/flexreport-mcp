@@ -119,16 +119,5 @@ class EarningsAnnouncementsResult(BaseModel):
     announcements: list[EarningsAnnouncement] = Field(description="Scheduled reports in the window; empty when nothing matches.")
 
 
-class ExchangeHours(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    exchange: Optional[str] = None
-    name: Optional[str] = None
-    isMarketOpen: Optional[bool] = Field(None, description="The answer: is the exchange open right now.")
-    openingHour: Optional[str] = Field(None, description="Session open with UTC offset.")
-    closingHour: Optional[str] = Field(None, description="Session close with UTC offset.")
-    timezone: Optional[str] = None
-
-
 class MarketOpenResult(BaseModel):
-    exchanges: list[ExchangeHours] = Field(description="One record for the requested exchange; read its isMarketOpen.")
+    is_open: bool = Field(description="True when the exchange is in its regular session right now.")

@@ -200,17 +200,13 @@ async def is_market_open(
     ctx: Context,
     exchange: Annotated[
         str,
-        Field(description="CASE-SENSITIVE uppercase exchange code, e.g. \"NYSE\", \"NASDAQ\", \"LSE\" "
-                          "(not full names). NYSE is right for US equities."),
+        Field(description="Exchange code, e.g. \"NYSE\", \"NASDAQ\", \"LSE\" or an ISO MIC like \"XNYS\" "
+                          "(not full names; case does not matter). NYSE is right for US equities."),
     ] = "NYSE",
 ) -> MarketOpenResult:
     """Check whether an exchange is currently open — a cheap routing helper.
 
-    An unknown or wrong-case code returns a 400 "Exchange not found." error.
-
-    Returns `exchanges`, a one-element list; the answer is its `isMarketOpen` boolean.
-    The record also carries the session hours (`openingHour`/`closingHour` with UTC
-    offsets), `timezone`, and any additional-session bounds.
+    Returns `is_open`, a single boolean. An unknown exchange code is an error.
 
     Use it to route between the market-hours tools: when the market is CLOSED,
     extended-hours data lives in `get_aftermarket_data`;
@@ -220,7 +216,7 @@ async def is_market_open(
     Unsure which exchange a ticker trades on? `get_company_snapshot` returns an
     `exchange` field whose value can be passed here as-is.
     """
-    exchanges = _ok(await _send(
+    is_open = _ok(await _send(
         ctx, "GET", "/is-market-open", params={"exchange" : exchange}, require_auth=False
     ))
-    return MarketOpenResult(exchanges=exchanges)
+    return MarketOpenResult(is_open=is_open)

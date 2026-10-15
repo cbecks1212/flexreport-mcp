@@ -248,18 +248,14 @@ def query_token(reference: str) -> str:
 
 
 def parse_market(raw: Any) -> dict[str, Any]:
-    """Normalise the /is-market-open payload (a one-element list) to {exchange, is_open, session}."""
-    rec = raw[0] if isinstance(raw, list) and raw else (raw if isinstance(raw, dict) else {})
-    if "error" in rec:
-        return {"exchange": "NYSE", "is_open": None, "session": "unknown", "error": rec.get("error")}
-    is_open = rec.get("isMarketOpen")
-    if is_open is None:
-        is_open = rec.get("is_open")
+    """Normalise the /is-market-open payload (a bare boolean) to {exchange, is_open, session}."""
+    if isinstance(raw, dict) and "error" in raw:
+        return {"exchange": "NYSE", "is_open": None, "session": "unknown", "error": raw.get("error")}
+    is_open = raw if isinstance(raw, bool) else None
     return {
-        "exchange": rec.get("exchange") or rec.get("stockExchangeName") or "NYSE",
-        "is_open": bool(is_open) if is_open is not None else None,
+        "exchange": "NYSE",
+        "is_open": is_open,
         "session": "regular" if is_open else ("closed" if is_open is not None else "unknown"),
-        "timezone": rec.get("timezone"),
     }
 
 
