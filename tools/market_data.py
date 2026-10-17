@@ -1,6 +1,8 @@
 """Market data tools: technical indicators, intraday outliers, after-hours bars, earnings calendar, market status."""
 
+from datetime import datetime
 from typing import Annotated, Any, Literal, Optional
+from zoneinfo import ZoneInfo
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
@@ -137,9 +139,22 @@ async def predict_earnings_move(
     how many reports that covers. Symbols with no scheduled report come back in
     `no_upcoming_earnings_symbols`; uncovered tickers in `not_supported_symbols`.
     """
-    return _ok(await _send(
+    rows = _ok(await _send(
         ctx, "POST", "/predict-earnings-announcement-move", json={"symbols" : symbols }
     ))
+    # The backend returns each symbol's latest scored report, plus a trailing
+    # {"not_supported_symbols": [...]} row when some tickers are uncovered.
+    not_supported = next((r["not_supported_symbols"] for r in rows if "not_supported_symbols" in r), [])
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    # A latest report dated before today is a past one: no upcoming report is scored yet.
+    predictions = [r for r in rows if "symbol" in r and (r.get("earnings_date") or "") >= today]
+    scored = {r["symbol"].upper() for r in predictions}
+    unsupported = {s.upper() for s in not_supported}
+    return EarningsMoveResult(
+        predictions=predictions,
+        not_supported_symbols=not_supported,
+        no_upcoming_earnings_symbols=[s for s in symbols if s.upper() not in scored | unsupported],
+    )
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List Earnings Announcements", readOnlyHint=True))
