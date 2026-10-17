@@ -5,9 +5,10 @@
 [![smithery badge](https://img.shields.io/badge/smithery-flexreport--finance-orange)](https://smithery.ai/servers/support-or61/flexreport-finance)
 [![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/cbecks1212/flexreport-mcp)
 
-A standalone **MCP microservice** that exposes the [FlexReport](https://app.flexreportfinapi.com/api-docs)
-equity backend's **live events**, **research-report artifacts**, and **database of
-750M+ datapoints** as on-demand tools for Claude (and any MCP client).
+A standalone **MCP microservice** that provides access to
+[Flexreport Finance](https://app.flexreportfinapi.com/mcp)'s **live events**,
+**research-report artifacts**, and **database of 750M+ datapoints** as on-demand
+tools for Claude (and any MCP client).
 
 It supercharges AI agents with real-time market events and curated, golden-source
 data spanning fundamentals, transcripts, filings, insider trades (Forms 3, 4, and 5),
@@ -45,14 +46,14 @@ report plans. As each report plan saves, Claude renders the refreshed report.
 > *"For every thing that comes, can you check if the latest report plan is available,
 > to pull a refreshed report to provide deeper context"*
 
-![Claude Code streaming Flexreport events after the close and rendering reports as their plans land](docs/demo/stream.gif)
+![Claude Code streaming Flexreport Finance events after the close and rendering reports as their plans land](docs/demo/stream.gif)
 
 **Open the research report.** Every figure links back to the query that produced
 it, and every headline links to its source. Here's a report for AAPL:
 
 > *"Get me the latest flexreport report for AAPL"*
 
-<a href="docs/demo/AAPL_report.pdf"><img src="docs/demo/aapl-report-p1.png" alt="Page 1 of the Flexreport AAPL company deep dive" width="600"></a>
+<a href="docs/demo/AAPL_report.pdf"><img src="docs/demo/aapl-report-p1.png" alt="Page 1 of the Flexreport Finance AAPL company deep dive" width="600"></a>
 
 [Open the full AAPL report (PDF, 13 pages)](docs/demo/AAPL_report.pdf)
 
@@ -60,19 +61,19 @@ it, and every headline links to its source. Here's a report for AAPL:
 
 ### 1. Real-time
 
-**1a. Streaming (events and real-time reports).** Subscribe to events as they publish, including the `report_plan` topic, which fires each time a report is ready, then pull the rendered report: *"Subscribe me to earnings releases, 8-Ks, IR publications and new report plans for NVDA, AVGO, AMD and MU. As each one lands, tell me what happened, check the intraday tape for an abnormal move, and pull the FlexReport report once it's ready."*
+**1a. Streaming (events and real-time reports).** Subscribe to events as they publish, including the `report_plan` topic, which fires each time a report is ready, then pull the rendered report: *"Subscribe me to earnings releases, 8-Ks, IR publications and new report plans for NVDA, AVGO, AMD and MU. As each one lands, tell me what happened, check the intraday tape for an abnormal move, and pull the Flexreport Finance report once it's ready."*
 
 Tools: `register_event_subscription` → `stream_event_subscription`, or ad-hoc `stream_events`, then `detect_intraday_outlier_jumps` and `get_latest_report`.
 
 By default, a live-streaming ask gets a **dashboard** (in Claude, an Artifact) rather than a chat transcript. The page runs the `stream_events` loop itself, carrying the cursor from read to read, so one prompt keeps the stream open. If the page can't reach the server, the agent runs the loop and writes each event into the dashboard. Ask for chat output explicitly if you prefer the terminal view shown in the demo above.
 
-**1b. Events from the past twelve hours.** Analyze real-time SEC 8-K filings, while also pulling in investor relations decks and 5-minute bars to quickly identify stocks making meaningful moves: *"What are the latest 8-K releases? Highlight the most significant ones, pull the accompanying investor relations releases via FlexReport, chart 5-minute bars for any names making meaningful moves, and tell me how they align with each company's current state. I would like this in tabular format: 8-K summary, company trend, FlexReport 8-K analysis S3 link, IR deck link."*
+**1b. Events from the past twelve hours.** Analyze real-time SEC 8-K filings, while also pulling in investor relations decks and 5-minute bars to quickly identify stocks making meaningful moves: *"What are the latest 8-K releases? Highlight the most significant ones, pull the accompanying investor relations releases via Flexreport Finance, chart 5-minute bars for any names making meaningful moves, and tell me how they align with each company's current state. I would like this in tabular format: 8-K summary, company trend, Flexreport Finance 8-K analysis S3 link, IR deck link."*
 
 Tools: `situate` → `list_realtime_events`, then `get_aftermarket_data` / `detect_intraday_outlier_jumps` and `get_latest_report`.
 
 ### 2. Reports
 
-**2a. The latest report for a specific company:** *"Pull the latest FlexReport report on Snowflake and summarize what changed this quarter: guidance, margins, and anything management flagged on the call."*
+**2a. The latest report for a specific company:** *"Pull the latest Flexreport Finance report on Snowflake and summarize what changed this quarter: guidance, margins, and anything management flagged on the call."*
 
 Tools: `get_latest_report(["SNOW"])`. A fresh plan renders in ~10-20 s; a `stale` or `missing` symbol can be rebuilt with `generate_report_for_stock`.
 
@@ -92,7 +93,7 @@ Tools: `list_earnings_announcements` → `predict_earnings_move`, `get_technical
 
 ### 4. Research and exploration
 
-Run thematic research on a market narrative: *"The AI trade has cooled recently, largely due to CapEx concerns and return on investment. I believe this has happened before, in the fall of 2025. Can you confirm, and what were the factors that allayed those concerns? Was it management commentary, continued demand for AI services, robust profitability and higher guidance? Please put together an in-depth report with FlexReport Finance."*
+Run thematic research on a market narrative: *"The AI trade has cooled recently, largely due to CapEx concerns and return on investment. I believe this has happened before, in the fall of 2025. Can you confirm, and what were the factors that allayed those concerns? Was it management commentary, continued demand for AI services, robust profitability and higher guidance? Please put together an in-depth report with Flexreport Finance."*
 
 Tools: `explore_data_catalogue` (transcripts, fundamentals, estimates), `trace_data_sources` / `get_document_section` for cited quotes, or `generate_research_report` for the full write-up.
 
@@ -200,7 +201,7 @@ Asked the same question twice — or the same question about a different company
 
 Want reports in your own format? A user supplies an HTML page — masthead, colours, layout, branding — and it is saved as a **blueprint**: the author's stylesheet and page chrome plus one markup pattern per content kind, which the backend applies automatically to every PDF it renders for that user (`get_latest_report` renders of fresh plans, `generate_report_for_stock` rebuilds, standard and custom, and scheduled reports). A template is structure and style applied to the document's own content: nobody fills template markup, and no other call changes. It is a visual choice, so it is approved by **looking**: `draft_user_template` compiles the page under several treatments and renders each as PNG previews of the platform's specimen document (an `add_on` restyles one section of the standard layout, named by `anchor`; a `bespoke` drives the whole document), the user picks one, and `save_user_template(draft_id, variant_id)` stores that treatment — one template per user, upserted. `update_user_template` changes any field later, or recompiles the stored design when called with no arguments; `get_user_template` shows what is in force; `delete_user_template` returns the user to the standard layouts.
 
-There is no agent-driven PDF builder: the `build_pdf_full_width` / `build_pdf_sidebar` tools (backend `/create-pdf` and `/create-pdf-sidebar`) and the `pdf_options` catalogue were retired in favour of templates. When a user wants a document composed from Flexreport data that no backend report covers — including a **bespoke** take on a company report ("the SNOW report, built around product revenue and RPO") — the agent explores the items they named, ideates with them over the result sets, and builds the PDF with its own document tooling, overlaying the agreed results in the user's saved template (`get_user_template`) when one exists — and offering to draft one (draft → preview → save, then update) when none does.
+There is no agent-driven PDF builder: the `build_pdf_full_width` / `build_pdf_sidebar` tools (backend `/create-pdf` and `/create-pdf-sidebar`) and the `pdf_options` catalogue were retired in favour of templates. When a user wants a document composed from Flexreport Finance data that no backend report covers — including a **bespoke** take on a company report ("the SNOW report, built around product revenue and RPO") — the agent explores the items they named, ideates with them over the result sets, and builds the PDF with its own document tooling, overlaying the agreed results in the user's saved template (`get_user_template`) when one exists — and offering to draft one (draft → preview → save, then update) when none does.
 
 Reports are on-demand: nothing regenerates until someone asks. The two report endpoints are strictly separate:
 
@@ -254,7 +255,7 @@ which enforces scope, plan, and quota.
 ### How it works
 
 Sign-in is a standard browser **authorization-code + PKCE** flow, run by your MCP
-client (e.g. Claude) against the FlexReport backend, which is the **Authorization
+client (e.g. Claude) against the Flexreport Finance backend, which is the **Authorization
 Server**. Register or sign in with an email + password, or use **Google
 Sign-In** — you never paste or type a token:
 
@@ -331,7 +332,7 @@ docker run -p 8000:8000 -e API_BASE_URL=https://flexreportfinapi.com flexreport-
 
 ## Privacy
 
-FlexReport's privacy policy — what's collected, retention windows, and the
+Flexreport Finance's privacy policy — what's collected, retention windows, and the
 third parties involved — is published at
 [app.flexreportfinapi.com/privacy](https://app.flexreportfinapi.com/privacy)
 (source: [PRIVACY.md](PRIVACY.md)).
