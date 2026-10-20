@@ -162,6 +162,12 @@ Default delivery for a live-streaming ask is a dashboard (in Claude, an Artifact
 | `list_earnings_announcements(start_date, end_date, symbols, industry, sector, market_cap)` | `POST /list-upcoming-earnings-announcements` | Scheduled earnings announcements in a date window (both default to today), covered names only; `sector` / `industry` / `market_cap` validated server-side (422 on a bad value) |
 | `is_market_open(exchange)` | `GET /is-market-open` | Is an exchange open now — returns a single `is_open` boolean (exchange code, default `NYSE`) — routes between `detect_intraday_outlier_jumps` (open) and `get_aftermarket_data` (closed). Public |
 
+### Data feeds (`tools/data_feeds.py`)
+
+| Tool | Backend endpoint | What it does |
+|---|---|---|
+| `download_dataset(dataset, start_date, end_date, latest_file_version, bulk_download, event_types, symbols, include_page_text, document_urls, max_rows)` | `GET /list-data-feed-options` + `POST /download-dataset` | Read Flexreport's **versioned daily feed files** by date. The feeds are not hardcoded: each call first reads the public catalogue (`list_options("data_feeds")`) and refuses an unknown `dataset` or `event_types` before spending a download; the catalogue's `returns` picks rows vs presigned links (valid 12 h), and rows carrying `document_url` + `page_number` collapse to one row per document unless page text is asked for. **Rate-limited to 3 calls/week per user**, so `start_date` is required (explicit ET dates, never the API's UTC default) and the tool does the narrowing itself on the one response: `symbols` / `document_urls` filtering, page collapsing, a `max_rows` cap (default 500) with `row_count` / `truncated`, and `notes` saying what was left out. Fetch once and embed; never poll it from a dashboard (authed) |
+
 ### Screening, portfolios & strategies (`tools/strategies.py`)
 
 | Tool | Backend endpoint | What it does |
@@ -187,7 +193,7 @@ Default delivery for a live-streaming ask is a dashboard (in Claude, an Artifact
 | Tool | Backend endpoint | What it does |
 |---|---|---|
 | `get_task_status(task_id)` | `GET /task-status` | Poll an async job to `SUCCESS` and read its `result` |
-| `list_options(kind, ticker, q, cik)` | `GET /list-realtime-event-options`, `/list-financial-items`, `/list-financial-ratios`, `/list-as-reported-items?ticker=`, `/list-revenue-segments?ticker=`, `/list-institutional-managers?q=&cik=`, `/get-sectors`, `/list-institutional-investor-types`, `/list-countries`, `/get-fiscal-quarter`, `/list-marketcap-options`, `/list-intraday-chart-options`, `/list-technical-indicators`, `/list-tickers`, `/list-symbols-with-names` | One catalogue tool: enumerate valid values for a parameter (event types, line items, ratios, a filer's own as-reported XBRL concepts and revenue segments (`ticker`), institutional managers by name fragment / CIK (`q` / `cik`), sectors, investor types, countries, fiscal quarter, market-cap buckets, intraday frequencies, technical indicators, and the ticker universe with or without company names) |
+| `list_options(kind, ticker, q, cik)` | `GET /list-realtime-event-options`, `/list-financial-items`, `/list-financial-ratios`, `/list-as-reported-items?ticker=`, `/list-revenue-segments?ticker=`, `/list-institutional-managers?q=&cik=`, `/get-sectors`, `/list-institutional-investor-types`, `/list-countries`, `/get-fiscal-quarter`, `/list-marketcap-options`, `/list-intraday-chart-options`, `/list-technical-indicators`, `/list-tickers`, `/list-symbols-with-names`, `/list-data-feed-options` | One catalogue tool: enumerate valid values for a parameter (event types, line items, ratios, a filer's own as-reported XBRL concepts and revenue segments (`ticker`), institutional managers by name fragment / CIK (`q` / `cik`), sectors, investor types, countries, fiscal quarter, market-cap buckets, intraday frequencies, technical indicators, the ticker universe with or without company names, and the `download_dataset` feeds) |
 | `list_sub_industries(sectors)` | `GET /get-sub-industries` | Distinct industries within the given sector(s) |
 | `onboard_symbol(symbol)` | `POST /onboard-symbol` | Request onboarding of an uncovered ticker (async, authed, 5/hour) |
 | `upgrade_plan()` | `GET /payment/upgrade-link` | Checkout link to upgrade or change the user's plan (e.g. after hitting a quota); payment completes in the browser |
@@ -227,6 +233,7 @@ tools/
   data_exploration.py    explore_data_*, signed drilldowns, trace_data_sources, document sections, saved queries
   utility.py             get_task_status, list_options, list_sub_industries, onboard_symbol, billing
   market_data.py         technical indicators, intraday outliers, after-hours bars, earnings calendar + move prediction, market status
+  data_feeds.py          download_dataset (versioned daily feed files)
   strategies.py          screen_stocks, portfolio optimization, stock picks, strategy track records
   scheduling.py          schedule / list / delete scheduled tasks
 ```
