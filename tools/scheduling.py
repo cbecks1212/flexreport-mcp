@@ -114,7 +114,8 @@ async def list_scheduled_tasks(
     Returns `tasks`, only the authenticated user's jobs, each as
     {"name", "active", "schedule" (cron string), "args", "kwargs", "enabled",
      "last_run_at", "total_run_count"}. Workflow schedules are named
-    "wf:{email}:{workflow-name}". Use `name` as the key to remove a job with
+    "wf:{email}:{workflow-name}"; dataset builds (save_user_dataset) are
+    "ds:{email}:{dataset-name}". Use `name` as the key to remove a job with
     `delete_scheduled_task`.
     """
     tasks = _ok(await _send(ctx, "GET", "/get-scheduled-tasks"))
@@ -135,7 +136,8 @@ async def delete_scheduled_task(
     For workflow schedules `task_name` is the value `schedule_task` returned as
     `task_name`. Deleting removes only
     the cron schedule; the saved workflow definition is kept and can be
-    re-scheduled by re-saving it via `schedule_task`. Returns
+    re-scheduled by re-saving it via `schedule_task`. For a "ds:" dataset schedule the
+    dataset and its files stay (re-save via `save_user_dataset` to resume). Returns
     {"msg": "<task_name> deleted"} on success, or an error if no such task exists.
     """
     return _ok(await _send(
