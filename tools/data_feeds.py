@@ -44,8 +44,7 @@ async def download_dataset(
     ctx: Context,
     dataset: Annotated[
         str,
-        Field(description="A `dataset` from list_options(\"data_feeds\") (free, no rate limit), "
-                          "e.g. \"earnings_volatility_predictions\"."),
+        Field(description="A `dataset` from list_options(\"data_feeds\") (free, no rate limit)."),
     ],
     start_date: Annotated[
         str,
@@ -96,7 +95,7 @@ async def download_dataset(
                           "row_count and truncated: true.", ge=1, le=100000),
     ] = 500,
 ) -> DownloadDatasetResult:
-    """Feed of versioned daily files (earnings-move predictions/actuals, investor decks, press releases, research-report PDFs, ...) by date. Use it over explore_data_catalogue when the user wants one of these datasets for a date or date range. RATE-LIMITED TO 3 CALLS PER WEEK per user (all datasets together, failed calls included): make ONE call with the narrowest dates, never test-fire it, never re-call because a result was trimmed, and never poll it from a dashboard — fetch once and embed the rows.
+    """Read one of Flexreport's versioned daily data feeds by date — the feeds and what each holds come from list_options("data_feeds"). Use it over explore_data_catalogue when one of those feeds answers the ask for a date or date range. RATE-LIMITED TO 3 CALLS PER WEEK per user (all datasets together, failed calls included): make ONE call with the narrowest dates, never test-fire it, never re-call because a result was trimmed, and never poll it from a dashboard — fetch once and embed the rows.
 
     list_options("data_feeds") lists the feeds — free, no rate limit — each as
     {dataset, description, returns, date_field, event_types}: `returns` is "rows" or
