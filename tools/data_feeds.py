@@ -1,5 +1,6 @@
 """Data feed tools: Flexreport's versioned daily dataset files (/download-dataset) and the
-user's own scheduled datasets (/draft-custom-dataset, /save-user-dataset, /list-user-datasets)."""
+user's own scheduled datasets (/draft-custom-dataset, /save-user-dataset, /list-user-datasets,
+/delete-user-data-feed)."""
 
 from typing import Annotated, Any, Literal, Optional
 
@@ -10,6 +11,8 @@ from pydantic import Field
 
 from core import mcp, _send, _ok
 from schemas.data_feeds import (
+    DatasetFormat,
+    DeleteUserDataFeedResult,
     DownloadDatasetResult,
     DraftCustomDatasetDispatch,
     ListUserDatasetsResult,
@@ -256,8 +259,13 @@ async def draft_custom_dataset(
         int,
         Field(description="Rows of each candidate returned as a sample.", ge=1, le=100),
     ] = 25,
+    target_format: Annotated[
+        Optional[DatasetFormat],
+        Field(description="The format the user plans to save in. rss/atom make the planner shape one row per "
+                          "feed item (title, link, description, pub_date, guid), newest first. Omit when unknown."),
+    ] = None,
 ) -> DraftCustomDatasetDispatch:
-    """Draft the user's OWN dataset — a table built from Flexreport data on a schedule and published as a file (parquet or csv) — from a plain-English description. Step 1 of 2: draft (and refine) here, then save_user_dataset schedules it. Use when the user wants a recurring file of their own ("build me a daily file of...", "a dataset I can pull every evening"); for Flexreport's published feeds use download_dataset, and for a one-off look at the data use explore_data_catalogue.
+    """Draft the user's OWN dataset — a table built from Flexreport data on a schedule and published as a file (parquet, csv, tsv, json, jsonl, xlsx, xml, or an rss/atom feed) behind a fixed link — from a plain-English description. Step 1 of 2: draft (and refine) here, then save_user_dataset schedules it. Use when the user wants a custom data feed or a recurring file of their own ("build me a daily file of...", "an RSS feed of...", "a JSON feed I can poll"); for Flexreport's published feeds use download_dataset, and for a one-off look at the data use explore_data_catalogue. Every column comes from stored data: a feed that needs WRITTEN summaries or analysis per run is a schedule_task workflow (a transform step) instead.
 
     Asynchronous: returns {draft_id, task_id, status: "PENDING"}. Poll task_id with
     get_task_status until SUCCESS — a draft takes about 30-90 s (validation, planning, a
@@ -272,6 +280,10 @@ async def draft_custom_dataset(
     and let them pick one. NEVER show `query_token` — it is an opaque sealed query whose
     only use is save_user_dataset — but keep the chosen candidate's for the save.
 
+    Pass `target_format` when the user has named one (always for rss/atom). A candidate
+    with a column named `published_at` can't be saved (that name is reserved for the
+    build time): refine it with feedback asking to rename the column.
+
     To refine, call again with the SAME `request`, previous_draft_id=<draft_id> and
     `feedback`; each round is a new draft with its own draft_id. Ask before saving: name,
     schedule, and (if not the suggestion) date mode.
@@ -282,6 +294,8 @@ async def draft_custom_dataset(
     if feedback and not previous_draft_id:
         raise ToolError("feedback refines an earlier draft: pass previous_draft_id with it.")
     body: dict[str, Any] = {"request": request, "sample_rows": sample_rows}
+    if target_format:
+        body["target_format"] = target_format
     if previous_draft_id:
         body["previous_draft_id"] = previous_draft_id
     if feedback:
@@ -323,8 +337,10 @@ async def save_user_dataset(
                           "`/` or `-` in either."),
     ],
     format: Annotated[
-        Literal["parquet", "csv"],
-        Field(description="File format of each build."),
+        DatasetFormat,
+        Field(description="File format of each build: parquet, csv, tsv, json (an array of records), jsonl, "
+                          "xlsx, xml, or rss / atom (a feed of the newest 200 rows as items). Use the user's "
+                          "choice, else the draft's target_format, else parquet."),
     ] = "parquet",
     build_now: Annotated[
         bool,
@@ -337,15 +353,23 @@ async def save_user_dataset(
     user, and 10 schedules per user shared with schedule_task workflows.
 
     Errors: 404 = that query_token is not a candidate of the caller's own draft; 422 = bad
-    cron, a limit reached, or the candidate no longer runs (draft it again); 503 = the
-    dataset saved but its schedule didn't attach — call this again with the same args.
+    cron, a limit reached, a column named `published_at` (reserved — refine the draft to
+    rename it), or the candidate no longer runs (draft it again); 503 = the dataset saved
+    but its schedule didn't attach — call this again with the same args.
 
     Returns {dataset_id, dataset_name, saved_query_id, task_name ("ds:{email}:{name}"),
-    cron, format, date_mode, schema: [{name, pg_type}], placeholder_id_to_poll,
-    build_task_id}. With build_now the first file usually lands within minutes —
-    list_user_datasets(dataset_name=...) shows it and its last_build_status. The schedule
+    cron, format, date_mode, schema: [{name, pg_type}], feed_fields, latest_url,
+    placeholder_id_to_poll, build_task_id}.
+    - `latest_url` is a FIXED link to the newest file with no sign-in (the link itself is
+      the key): give it to the user as THE feed URL — for an RSS reader, Excel / Google
+      Sheets web import, or another platform's poller. It returns 404 until the first
+      build writes a file; with build_now that usually takes minutes.
+    - `feed_fields` (rss/atom only) shows which column fills each item field {title, link,
+      description, pub_date, guid}; tell the user if one fell back (null).
+    list_user_datasets(dataset_name=...) shows the build's last_build_status. The schedule
     appears in list_scheduled_tasks as `task_name`; delete_scheduled_task(task_name)
-    stops the builds but keeps the dataset and its files.
+    stops the builds but keeps the dataset and its files; delete_user_data_feed removes
+    the dataset entirely.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
@@ -384,12 +408,13 @@ async def list_user_datasets(
 
     Returns {count, datasets: [{name, user_request, output_schema, file_format,
     date_mode, cron, task_name, last_built_at, last_build_status, last_row_count,
-    files: [{run_date, published_at, url}]}]}. `last_build_status` is written,
+    latest_url, files: [{run_date, published_at, url}]}]}. `latest_url` is the fixed,
+    sign-in-free link to the newest file — the one to give for "what's my feed URL?". `last_build_status` is written,
     unchanged (same rows as the last file, so no new file), empty, too_large (over 500k
     rows), schema_drift (columns no longer match the saved schema — re-draft and re-save
     under the same name) or failed.
 
-    Each `url` is a presigned link valid 12 HOURS: hand it to the user as a link; never
+    Each file `url` is a presigned link valid 12 HOURS: hand it to the user as a link; never
     fetch the file into the chat or store the link. Not rate-limited beyond the plan
     quota. Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
@@ -403,3 +428,19 @@ async def list_user_datasets(
     if end_date:
         params["end_date"] = end_date
     return _ok(await _send(ctx, "GET", "/list-user-datasets", params=params))
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Delete User Data Feed", readOnlyHint=False, destructiveHint=True, idempotentHint=True))
+async def delete_user_data_feed(
+    ctx: Context,
+    dataset_name: Annotated[str, Field(description="The dataset's `name`, as list_user_datasets shows it.")],
+) -> DeleteUserDataFeedResult:
+    """Delete one of the user's own datasets completely: its schedule, every file it built, its fixed latest_url link, and the saved query behind it. It can't be undone — confirm with the user first, naming the dataset. To only stop the builds and keep the files, use delete_scheduled_task("ds:{email}:{name}") instead.
+
+    Returns {msg, dataset_id, schedule_deleted, files_deleted, saved_query_deleted}.
+    Errors: 404 = the user has no dataset of that name; 503 = a step failed partway —
+    call again with the same name (every step is safe to repeat).
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    """
+    return _ok(await _send(ctx, "DELETE", "/delete-user-data-feed", params={"dataset_name": dataset_name}))
