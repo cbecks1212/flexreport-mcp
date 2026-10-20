@@ -26,8 +26,8 @@ class ListOptionsResult(BaseModel):
     kind: str = Field(description="The catalog that was listed.")
     options: Union[list[Any], dict[str, Any], int, float, str, None] = Field(
         description="The valid values. Usually a list — bare strings for most kinds, records for "
-                    "event_types, tickers, tickers_with_names, as_reported_items, revenue_segments "
-                    "and institutional_managers. fiscal_quarter is a single quarter number."
+                    "event_types, tickers, tickers_with_names, as_reported_items, revenue_segments, "
+                    "institutional_managers and data_feeds. fiscal_quarter is a single quarter number."
     )
 
 

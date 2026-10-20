@@ -34,6 +34,7 @@ _OPTION_ENDPOINTS = {
     "as_reported_items": "/list-as-reported-items",
     "revenue_segments": "/list-revenue-segments",
     "institutional_managers": "/list-institutional-managers",
+    "data_feeds": "/list-data-feed-options",
 }
 
 # Catalogues that take a query parameter: a filer's own vocabularies (its tagged XBRL
@@ -64,6 +65,7 @@ _OptionKind = Literal[
     "as_reported_items",
     "revenue_segments",
     "institutional_managers",
+    "data_feeds",
 ]
 assert set(get_args(_OptionKind)) == set(_OPTION_ENDPOINTS)
 assert set(_OPTION_QUERY_PARAMS) <= set(_OPTION_ENDPOINTS)
@@ -156,6 +158,12 @@ async def list_options(
                                         universe ONLY — market indices are NOT in
                                         this list, only in "tickers" (an even larger
                                         payload)
+    - "data_feeds"                   -> the datasets `download_dataset` accepts, as
+                                        {dataset, description, returns ("rows" or
+                                        "download_links"), date_field, event_types
+                                        (valid filter, null = unsupported)}. Call this,
+                                        not download_dataset (3 calls/week), to answer
+                                        "what feeds are there"
 
     Returns `options` (the values for that kind). Authoritative and never stale: it
     reads the backend's live config, not a hardcoded list. Public — no auth required.

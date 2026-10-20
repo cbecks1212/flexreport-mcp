@@ -15,6 +15,7 @@ from tools import (  # noqa: F401  (imported for their registration side effects
     data_exploration,
     utility,
     market_data,
+    data_feeds,
     strategies,
     scheduling,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "data_exploration",
     "utility",
     "market_data",
+    "data_feeds",
     "strategies",
     "scheduling",
 ]
