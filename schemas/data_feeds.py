@@ -29,6 +29,10 @@ class DownloadDatasetResult(BaseModel):
     notes: list[str] = Field(description="One line per thing left out or worth telling the user (pages collapsed, symbols filtered, truncation, empty feed).")
 
 
+# File formats a user dataset can be saved in (backend DatasetFormat).
+DatasetFormat = Literal["parquet", "csv", "tsv", "json", "jsonl", "xlsx", "xml", "rss", "atom"]
+
+
 class DraftCustomDatasetDispatch(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -53,9 +57,18 @@ class SaveUserDatasetResult(BaseModel):
     saved_query_id: Optional[Any] = Field(None, description="The saved query the builds run.")
     task_name: str = Field(description="\"ds:{email}:{name}\" — the schedule's key in list_scheduled_tasks / delete_scheduled_task.")
     cron: str = Field(description="When builds fire (America/New_York).")
-    format: Literal["parquet", "csv"]
+    format: DatasetFormat
     date_mode: Literal["rolling", "snapshot"]
     schema_: list[DatasetColumn] = Field(alias="schema", description="Columns every build must produce.")
+    feed_fields: Optional[dict[str, Optional[str]]] = Field(
+        None, description="rss/atom only: the column filling each item field {title, link, description, pub_date, "
+                          "guid}; null = fallback (description lists the other columns, pub_date = build time, "
+                          "guid = link or a row hash)."
+    )
+    latest_url: Optional[str] = Field(
+        None, description="Fixed, sign-in-free link to the newest file (the link is the key) — for an RSS reader, "
+                          "Excel / Google Sheets web import or a platform's poller. 404 until the first build."
+    )
     placeholder_id_to_poll: Optional[str] = Field(None, description="Task authoring the rolling-date placeholder twin; no need to poll.")
     build_task_id: Optional[str] = Field(None, description="The first build's task (build_now); null when not dispatched.")
 
@@ -84,6 +97,7 @@ class UserDataset(BaseModel):
                           "schema_drift (columns no longer match) | failed; null before the first build."
     )
     last_row_count: Optional[int] = None
+    latest_url: Optional[str] = Field(None, description="Fixed, sign-in-free link to the newest file; 404 until the first build.")
     files: list[UserDatasetFile] = Field(default_factory=list)
 
 
@@ -92,3 +106,13 @@ class ListUserDatasetsResult(BaseModel):
 
     count: int
     datasets: list[UserDataset]
+
+
+class DeleteUserDataFeedResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    msg: str = Field(description="\"Deleted dataset <name>\".")
+    dataset_id: Optional[Any] = None
+    schedule_deleted: Optional[bool] = Field(None, description="False when the schedule was already gone.")
+    files_deleted: Optional[int] = Field(None, description="Published files removed.")
+    saved_query_deleted: Optional[Any] = Field(None, description="Id of the saved query removed with it.")

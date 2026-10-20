@@ -137,7 +137,8 @@ async def delete_scheduled_task(
     `task_name`. Deleting removes only
     the cron schedule; the saved workflow definition is kept and can be
     re-scheduled by re-saving it via `schedule_task`. For a "ds:" dataset schedule the
-    dataset and its files stay (re-save via `save_user_dataset` to resume). Returns
+    dataset and its files stay (re-save via `save_user_dataset` to resume;
+    `delete_user_data_feed` removes the dataset itself). Returns
     {"msg": "<task_name> deleted"} on success, or an error if no such task exists.
     """
     return _ok(await _send(
