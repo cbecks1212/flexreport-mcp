@@ -18,9 +18,9 @@ class DownloadDatasetResult(BaseModel):
     bulk_download: bool = Field(description="True when every published date was requested.")
     latest_file_version: bool = Field(description="True = newest file version per date only; false = every version.")
     shape: Literal["rows", "documents", "pages", "download_links"] = Field(
-        description="What `rows` holds: `rows` (earnings vol), `documents` (one row per deck / press release, "
-                    "no page text), `pages` (one row per document page, with `content`), or `download_links` "
-                    "(research zips, presigned URLs valid 12 hours)."
+        description="What `rows` holds: `rows` (the feed's rows as sent), `documents` (a document feed "
+                    "collapsed to one row per document, no page text), `pages` (one row per document page, "
+                    "with `content`), or `download_links` (presigned URLs valid 12 hours)."
     )
     rows: list[dict[str, Any]] = Field(description="The feed rows after symbol filtering, collapsing and the max_rows cap.")
     row_count: int = Field(description="Rows before the max_rows cap (after symbol filtering and collapsing).")
