@@ -82,7 +82,7 @@ async def get_task_status(
     ctx: Context,
     task_id: Annotated[str, Field(description="The task_id an async tool returned.")],
 ) -> TaskStatusResult:
-    """Poll the status of an async job (a get_latest_report `rendering` task, generate_report_for_stock, generate_research_report, explore_data_catalogue, explore_data_coverage, screen_stocks, ...).
+    """Poll the status of an async job (a get_latest_report `rendering` task, generate_report_for_stock, generate_research_report, explore_data_catalogue, explore_data_coverage, draft_custom_dataset, screen_stocks, ...).
 
     Returns {"task_id": ..., "status": ..., "result": ...}. `status` is one of
     PENDING, SUCCESS, FAILURE, RETRY. `result` is populated once status is SUCCESS.

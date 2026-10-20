@@ -1,6 +1,7 @@
-"""Data feed tools: versioned daily dataset files read back through /download-dataset."""
+"""Data feed tools: Flexreport's versioned daily dataset files (/download-dataset) and the
+user's own scheduled datasets (/draft-custom-dataset, /save-user-dataset, /list-user-datasets)."""
 
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from mcp.server.fastmcp import Context
 from mcp.server.fastmcp.exceptions import ToolError
@@ -8,7 +9,12 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from core import mcp, _send, _ok
-from schemas.data_feeds import DownloadDatasetResult
+from schemas.data_feeds import (
+    DownloadDatasetResult,
+    DraftCustomDatasetDispatch,
+    ListUserDatasetsResult,
+    SaveUserDatasetResult,
+)
 
 
 # Per-page columns of a document feed (rows carrying a `document_url` and a
@@ -225,3 +231,175 @@ async def download_dataset(
         published_at=max(published) if published else None,
         notes=notes,
     )
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Draft Custom Dataset", readOnlyHint=True))
+async def draft_custom_dataset(
+    ctx: Context,
+    request: Annotated[
+        str,
+        Field(description="The dataset to build, in plain English — what rows, which columns, which names, what "
+                          "window (e.g. \"daily close and 20-day average volume for AAPL, MSFT, NVDA over the last "
+                          "3 months\"). When refining, re-send the same request."),
+    ],
+    previous_draft_id: Annotated[
+        Optional[str],
+        Field(description="draft_id of an earlier draft to refine (with `feedback`); the planner sees that "
+                          "draft's queries."),
+    ] = None,
+    feedback: Annotated[
+        Optional[str],
+        Field(description="What to change about the previous draft, e.g. \"add the 50-day average\", \"weekly "
+                          "instead of daily\". Only with previous_draft_id."),
+    ] = None,
+    sample_rows: Annotated[
+        int,
+        Field(description="Rows of each candidate returned as a sample.", ge=1, le=100),
+    ] = 25,
+) -> DraftCustomDatasetDispatch:
+    """Draft the user's OWN dataset — a table built from Flexreport data on a schedule and published as a file (parquet or csv) — from a plain-English description. Step 1 of 2: draft (and refine) here, then save_user_dataset schedules it. Use when the user wants a recurring file of their own ("build me a daily file of...", "a dataset I can pull every evening"); for Flexreport's published feeds use download_dataset, and for a one-off look at the data use explore_data_catalogue.
+
+    Asynchronous: returns {draft_id, task_id, status: "PENDING"}. Poll task_id with
+    get_task_status until SUCCESS — a draft takes about 30-90 s (validation, planning, a
+    sample run, finalize). On SUCCESS `result` is:
+      {draft_id, validation_status: "OK" | "REJECTED", reason?, suggested_alternative?,
+       user_request,
+       candidates: [{name, description, columns, row_count, sample_rows, query_token,
+                     has_fixed_dates, suggested_date_mode}]}
+    REJECTED -> relay `reason` and `suggested_alternative`; don't retry blindly.
+
+    Show the user each candidate's description, columns, row_count and a few sample_rows
+    and let them pick one. NEVER show `query_token` — it is an opaque sealed query whose
+    only use is save_user_dataset — but keep the chosen candidate's for the save.
+
+    To refine, call again with the SAME `request`, previous_draft_id=<draft_id> and
+    `feedback`; each round is a new draft with its own draft_id. Ask before saving: name,
+    schedule, and (if not the suggestion) date mode.
+
+    Rate-limited to 20 drafts per hour per user. Requires auth (your MCP client attaches
+    the OAuth bearer automatically).
+    """
+    if feedback and not previous_draft_id:
+        raise ToolError("feedback refines an earlier draft: pass previous_draft_id with it.")
+    body: dict[str, Any] = {"request": request, "sample_rows": sample_rows}
+    if previous_draft_id:
+        body["previous_draft_id"] = previous_draft_id
+    if feedback:
+        body["feedback"] = feedback
+
+    resp = await _send(ctx, "POST", "/draft-custom-dataset", json=body)
+    if isinstance(resp, dict) and "HTTP 429" in str(resp.get("error", "")):
+        raise ToolError(
+            "draft_custom_dataset's limit is 20 drafts per hour per user (or the plan's daily quota) and it has "
+            "been used up. Work from a draft already returned, or call upgrade_plan if the user hit their plan quota."
+        )
+    return _ok(resp)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Save User Dataset", readOnlyHint=False, destructiveHint=False, idempotentHint=True))
+async def save_user_dataset(
+    ctx: Context,
+    draft_id: Annotated[str, Field(description="draft_id from draft_custom_dataset.")],
+    query_token: Annotated[
+        str,
+        Field(description="query_token of the candidate the user chose, from that draft's get_task_status result."),
+    ],
+    dataset_name: Annotated[
+        str,
+        Field(description="Lowercase name, 3-64 chars: letters, digits, _ and -. Re-saving the same name "
+                          "replaces the dataset's rules and keeps its files.",
+              pattern=r"^[a-z0-9][a-z0-9_-]{2,63}$"),
+    ],
+    date_mode: Annotated[
+        Literal["rolling", "snapshot"],
+        Field(description="The candidate's `suggested_date_mode` unless the user says otherwise. rolling = move "
+                          "the query's fixed dates forward to each build date, keeping the window length; "
+                          "snapshot = re-run the query exactly as saved."),
+    ],
+    cron: Annotated[
+        str,
+        Field(description="When to build, 5-field cron in America/New_York, e.g. \"30 18 * * 1-5\" (weekdays "
+                          "18:30). Minute must be a literal number and hour at most 4 literal hours — no `*`, "
+                          "`/` or `-` in either."),
+    ],
+    format: Annotated[
+        Literal["parquet", "csv"],
+        Field(description="File format of each build."),
+    ] = "parquet",
+    build_now: Annotated[
+        bool,
+        Field(description="Build the first file right away (default) instead of waiting for the cron."),
+    ] = True,
+) -> SaveUserDatasetResult:
+    """Save a drafted candidate as the user's scheduled dataset (step 2 of 2, after draft_custom_dataset): its query, the schema it produces, the file format, the date mode and a cron schedule. Each build publishes a new file only when the rows changed; list_user_datasets returns the files.
+
+    Confirm the name and schedule with the user before calling. Limits: 5 datasets per
+    user, and 10 schedules per user shared with schedule_task workflows.
+
+    Errors: 404 = that query_token is not a candidate of the caller's own draft; 422 = bad
+    cron, a limit reached, or the candidate no longer runs (draft it again); 503 = the
+    dataset saved but its schedule didn't attach — call this again with the same args.
+
+    Returns {dataset_id, dataset_name, saved_query_id, task_name ("ds:{email}:{name}"),
+    cron, format, date_mode, schema: [{name, pg_type}], placeholder_id_to_poll,
+    build_task_id}. With build_now the first file usually lands within minutes —
+    list_user_datasets(dataset_name=...) shows it and its last_build_status. The schedule
+    appears in list_scheduled_tasks as `task_name`; delete_scheduled_task(task_name)
+    stops the builds but keeps the dataset and its files.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    """
+    return _ok(await _send(ctx, "POST", "/save-user-dataset", json={
+        "draft_id": draft_id,
+        "query_token": query_token,
+        "dataset_name": dataset_name,
+        "date_mode": date_mode,
+        "cron": cron,
+        "format": format,
+        "build_now": build_now,
+    }))
+
+
+@mcp.tool(annotations=ToolAnnotations(title="List User Datasets", readOnlyHint=True))
+async def list_user_datasets(
+    ctx: Context,
+    dataset_name: Annotated[
+        Optional[str],
+        Field(description="One dataset by name; all of the user's when omitted."),
+    ] = None,
+    start_date: Annotated[
+        Optional[str],
+        Field(description="First build date (YYYY-MM-DD, ET) of the files to list.", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    ] = None,
+    end_date: Annotated[
+        Optional[str],
+        Field(description="Last build date (YYYY-MM-DD, ET) of the files to list.", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    ] = None,
+    latest_only: Annotated[
+        bool,
+        Field(description="True (default) = newest file per build date; false = every version."),
+    ] = True,
+) -> ListUserDatasetsResult:
+    """List the user's own saved datasets (from save_user_dataset) with their build status and download links to the published files.
+
+    Returns {count, datasets: [{name, user_request, output_schema, file_format,
+    date_mode, cron, task_name, last_built_at, last_build_status, last_row_count,
+    files: [{run_date, published_at, url}]}]}. `last_build_status` is written,
+    unchanged (same rows as the last file, so no new file), empty, too_large (over 500k
+    rows), schema_drift (columns no longer match the saved schema — re-draft and re-save
+    under the same name) or failed.
+
+    Each `url` is a presigned link valid 12 HOURS: hand it to the user as a link; never
+    fetch the file into the chat or store the link. Not rate-limited beyond the plan
+    quota. Requires auth (your MCP client attaches the OAuth bearer automatically).
+    """
+    if start_date and end_date and end_date < start_date:
+        raise ToolError(f"end_date {end_date} is before start_date {start_date}.")
+    params: dict[str, Any] = {"latest_only": latest_only}
+    if dataset_name:
+        params["dataset_name"] = dataset_name
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+    return _ok(await _send(ctx, "GET", "/list-user-datasets", params=params))

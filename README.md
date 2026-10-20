@@ -167,6 +167,9 @@ Default delivery for a live-streaming ask is a dashboard (in Claude, an Artifact
 | Tool | Backend endpoint | What it does |
 |---|---|---|
 | `download_dataset(dataset, start_date, end_date, latest_file_version, bulk_download, event_types, symbols, include_page_text, document_urls, max_rows)` | `GET /list-data-feed-options` + `POST /download-dataset` | Read Flexreport's **versioned daily feed files** by date. The feeds are not hardcoded: each call first reads the public catalogue (`list_options("data_feeds")`) and refuses an unknown `dataset` or `event_types` before spending a download; the catalogue's `returns` picks rows vs presigned links (valid 12 h), and rows carrying `document_url` + `page_number` collapse to one row per document unless page text is asked for. **Rate-limited to 3 calls/week per user**, so `start_date` is required (explicit ET dates, never the API's UTC default) and the tool does the narrowing itself on the one response: `symbols` / `document_urls` filtering, page collapsing, a `max_rows` cap (default 500) with `row_count` / `truncated`, and `notes` saying what was left out. Fetch once and embed; never poll it from a dashboard (authed) |
+| `draft_custom_dataset(request, previous_draft_id, feedback, sample_rows)` | `POST /draft-custom-dataset` | Step 1 of the user's **own scheduled datasets**: plans candidate tables from a plain-English description and samples each. Async (`task_id` = `draft_id`, ~30-90 s via `get_task_status`); the result's candidates carry an opaque `query_token` that is never shown, only passed to the save. Refine with the same `request` + `previous_draft_id` + `feedback`. 20/hour per user (authed) |
+| `save_user_dataset(draft_id, query_token, dataset_name, date_mode, cron, format, build_now)` | `POST /save-user-dataset` | Step 2: saves the chosen candidate with its schema, format (parquet/csv), date mode (`rolling` shifts fixed dates to each build date, `snapshot` re-runs as saved) and an ET cron (literal minute, ≤4 literal hours). Upserts by name; schedule appears as `ds:{email}:{name}` in `list_scheduled_tasks`. Max 5 datasets, 10 schedules shared with workflows (authed) |
+| `list_user_datasets(dataset_name, start_date, end_date, latest_only)` | `GET /list-user-datasets` | The user's datasets with last build status (`written` / `unchanged` / `empty` / `too_large` / `schema_drift` / `failed`) and presigned 12 h links to each build's file — handed to the user, never fetched (authed) |
 
 ### Screening, portfolios & strategies (`tools/strategies.py`)
 
@@ -233,7 +236,7 @@ tools/
   data_exploration.py    explore_data_*, signed drilldowns, trace_data_sources, document sections, saved queries
   utility.py             get_task_status, list_options, list_sub_industries, onboard_symbol, billing
   market_data.py         technical indicators, intraday outliers, after-hours bars, earnings calendar + move prediction, market status
-  data_feeds.py          download_dataset (versioned daily feed files)
+  data_feeds.py          download_dataset (versioned daily feed files), user datasets (draft / save / list)
   strategies.py          screen_stocks, portfolio optimization, stock picks, strategy track records
   scheduling.py          schedule / list / delete scheduled tasks
 ```
