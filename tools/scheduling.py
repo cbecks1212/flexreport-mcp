@@ -49,7 +49,9 @@ async def schedule_task(
     Use this when the user wants a sequence of platform calls delivered ON A
     SCHEDULE / repeatedly (e.g. "every weekday morning pull 8-K releases, screen
     for cheap large-caps, and email me the overlaps as a table"). For a ONE-OFF
-    request, call the corresponding tools directly instead.
+    request, call the corresponding tools directly instead. A request worded as a
+    "datafeed" / "feed" / recurring file is draft_custom_dataset, not this — even
+    with summary columns, since stored summaries are ordinary dataset columns.
 
     `steps` (shape in the parameter description): a transform applies its
     instruction to the accumulated results of ALL prior steps (e.g. "intersect the
