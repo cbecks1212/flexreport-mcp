@@ -257,18 +257,19 @@ async def draft_custom_dataset(
     ] = None,
     sample_rows: Annotated[
         int,
-        Field(description="Rows of each candidate returned as a sample.", ge=1, le=100),
-    ] = 25,
+        Field(description="Rows of each candidate returned as a sample (the backend returns at most 5).",
+              ge=1, le=100),
+    ] = 5,
     target_format: Annotated[
         Optional[DatasetFormat],
         Field(description="The format the user plans to save in. rss/atom make the planner shape one row per "
                           "feed item (title, link, description, pub_date, guid), newest first. Omit when unknown."),
     ] = None,
 ) -> DraftCustomDatasetDispatch:
-    """Draft the user's OWN dataset — a table built from Flexreport data on a schedule and published as a file (parquet, csv, tsv, json, jsonl, xlsx, xml, or an rss/atom feed) behind a fixed link — from a plain-English description. Step 1 of 2: draft (and refine) here, then save_user_dataset schedules it. Use when the user wants a custom data feed or a recurring file of their own ("build me a daily file of...", "an RSS feed of...", "a JSON feed I can poll"); for Flexreport's published feeds use download_dataset, and for a one-off look at the data use explore_data_catalogue. This is THE tool for any request worded as a "datafeed" or "feed" — never substitute schedule_task, an emailed workflow or a one-off file. Every column comes from stored data, and that includes the summaries and analysis Flexreport already stores (deck, press-release and 8-K summaries, key figures, flags, recommendations, research views), so a feed with summary columns is still a dataset; only new written analysis generated fresh each run is a schedule_task workflow (a transform step).
+    """Draft the user's OWN dataset — a table built from Flexreport data on a schedule and published as a file (parquet, csv, tsv, json, jsonl, xlsx, xml, or an rss/atom feed) behind a fixed link — from a plain-English description. Step 1 of 2: draft (and refine) here, then save_user_dataset schedules it. Use when the user wants a custom data feed or a recurring file of their own ("build me a daily file of...", "an RSS feed of...", "a JSON feed I can poll"); for Flexreport's published feeds use download_dataset, and for a one-off look at the data use explore_data_catalogue. This is THE tool for any request worded as a "datafeed" or "feed" — never substitute schedule_task, an emailed workflow or a one-off file. RESEARCH BEFORE DRAFTING: situate + get_event_ontology for the feed's event types (`persisted_in`), resolve the definitions with the user (universe, window, proxies — ask, don't guess), ONE scoped explore_data_catalogue census over company_event_node, then send an INFORMED request naming the table and column behind each field — a vague one-line request drafts label-like titles and missing links. Every column comes from stored data, and that includes the summaries and analysis Flexreport already stores (deck, press-release and 8-K summaries, key figures, flags, recommendations, research views), so a feed with summary columns is still a dataset; only new written analysis generated fresh each run is a schedule_task workflow (a transform step).
 
     Asynchronous: returns {draft_id, task_id, status: "PENDING"}. Poll task_id with
-    get_task_status until SUCCESS — a draft takes about 30-90 s (validation, planning, a
+    get_task_status until SUCCESS — a draft takes about 45 s-4 min (validation, planning, a
     sample run, finalize). On SUCCESS `result` is:
       {draft_id, validation_status: "OK" | "REJECTED", reason?, suggested_alternative?,
        user_request,
@@ -279,13 +280,18 @@ async def draft_custom_dataset(
     Show the user each candidate's description, columns, row_count and a few sample_rows
     and let them pick one. NEVER show `query_token` — it is an opaque sealed query whose
     only use is save_user_dataset — but keep the chosen candidate's for the save.
+    - Samples show datetime columns as dates only; the built file keeps the full
+      timestamp, so never tell the user a timestamp is missing from a sample.
+    - Candidates can be near-identical: compare their descriptions, not just the samples.
 
     Pass `target_format` when the user has named one (always for rss/atom). A candidate
     with a column named `published_at` can't be saved (that name is reserved for the
     build time): refine it with feedback asking to rename the column.
 
     To refine, call again with the SAME `request`, previous_draft_id=<draft_id> and
-    `feedback`; each round is a new draft with its own draft_id. Ask before saving: name,
+    `feedback` carrying concrete fixes ("title = company name + fiscal period + EPS vs
+    estimate", "link = sec_link"); ask for "ONE candidate" when the variants don't matter.
+    Each round is a new draft with its own draft_id. Ask before saving: name,
     schedule, and (if not the suggestion) date mode.
 
     Rate-limited to 20 drafts per hour per user. Requires auth (your MCP client attaches
@@ -332,14 +338,15 @@ async def save_user_dataset(
     ],
     cron: Annotated[
         str,
-        Field(description="When to build, 5-field cron in America/New_York, e.g. \"30 18 * * 1-5\" (weekdays "
-                          "18:30). Minute must be a literal number and hour at most 4 literal hours — no `*`, "
-                          "`/` or `-` in either."),
+        Field(description="When to build, any valid 5-field cron in America/New_York, e.g. \"30 18 * * 1-5\" "
+                          "(weekdays 18:30), \"*/30 * * * *\" (every 30 minutes), \"0 9-17 * * 1-5\" (hourly in "
+                          "market hours)."),
     ],
     format: Annotated[
         DatasetFormat,
         Field(description="File format of each build: parquet, csv, tsv, json (an array of records), jsonl, "
-                          "xlsx, xml, or rss / atom (a feed of the newest 200 rows as items). Use the user's "
+                          "xlsx, xml, or rss / atom (a feed of the newest 200 rows as items; rss items carry "
+                          "<company:symbol> and <category> tags for syndication partners). Use the user's "
                           "choice, else the draft's target_format, else parquet."),
     ] = "parquet",
     build_now: Annotated[
@@ -349,8 +356,31 @@ async def save_user_dataset(
 ) -> SaveUserDatasetResult:
     """Save a drafted candidate as the user's scheduled dataset (step 2 of 2, after draft_custom_dataset): its query, the schema it produces, the file format, the date mode and a cron schedule. Each build publishes a new file only when the rows changed; list_user_datasets returns the files.
 
-    Confirm the name and schedule with the user before calling. Limits: 5 datasets per
-    user, and 10 schedules per user shared with schedule_task workflows.
+    Every build is reviewed before it publishes: an LLM checks each NEW item for being
+    intelligible, actionable, complete, relevant and internally consistent. It can correct
+    text from stored sources (a cut-off sentence, a fiscal period missing from a title, a
+    figure confirmed by the event graph), add a one-line caveat, or hold an item out of
+    the file (junk, misattributed, off-topic or materially wrong). Links, GUIDs, tickers
+    and dates are never changed, and no figure is published that isn't in the stored data
+    — so a file can hold fewer rows than the query returns, and text can differ slightly
+    from the draft sample.
+
+    RSS files carry what syndication partners (e.g. Newstex) read:
+    - `<company:symbol>EXCHANGE:TICKER</company:symbol>` per item, from a `company_symbol`
+      / `ticker_exchange` column, else from `symbol` plus its listed exchange; non-US
+      venue suffixes are dropped (BARC.L -> LSE:BARC).
+    - Up to 10 `<category>` tags, from `categories`, `category`, `event_type`,
+      `document_type`, `doc_type`, `sector` and `industry`.
+    - One item per guid: a document listed under several tickers is one story carrying
+      every ticker.
+    - Channel title "Flexreport Finance: <name>", a copyright line and a source line;
+      JSON source links are unwrapped to their URL.
+
+    Confirm the name and schedule with the user before calling. Any valid cron is accepted
+    (hourly, every 30 minutes, ranges), but one expression can't give each hour a different
+    minute: for 9:30 and 20:00 offer "0,30 9,20 * * *" (also 9:00 and 20:30) or two
+    datasets. Limits: 5 datasets per user, and 10 schedules per user shared with
+    schedule_task workflows.
 
     Errors: 404 = that query_token is not a candidate of the caller's own draft; 422 = bad
     cron, a limit reached, a column named `published_at` (reserved — refine the draft to
@@ -361,7 +391,8 @@ async def save_user_dataset(
     cron, format, date_mode, schema: [{name, pg_type}], feed_fields, latest_url,
     placeholder_id_to_poll, build_task_id}.
     - `latest_url` is a FIXED link to the newest file with no sign-in (the link itself is
-      the key): give it to the user as THE feed URL — for an RSS reader, Excel / Google
+      the key): give it to the user as THE feed URL — for an RSS reader, a syndication
+      partner's poller (rss items carry <company:symbol> and <category>), Excel / Google
       Sheets web import, or another platform's poller. It returns 404 until the first
       build writes a file; with build_now that usually takes minutes.
     - `feed_fields` (rss/atom only) shows which column fills each item field {title, link,
@@ -406,10 +437,16 @@ async def list_user_datasets(
 ) -> ListUserDatasetsResult:
     """List the user's own saved datasets (from save_user_dataset) with their build status and download links to the published files.
 
+    Every build is reviewed before it publishes: each NEW item can be corrected from stored
+    sources, given a one-line caveat, or held out of the file (links, GUIDs, tickers and
+    dates are never changed). So `last_row_count` / a file can hold fewer rows than the
+    query returns, and text can differ slightly from the draft sample.
+
     Returns {count, datasets: [{name, user_request, output_schema, file_format,
     date_mode, cron, task_name, last_built_at, last_build_status, last_row_count,
     latest_url, files: [{run_date, published_at, url}]}]}. `latest_url` is the fixed,
-    sign-in-free link to the newest file — the one to give for "what's my feed URL?". `last_build_status` is written,
+    sign-in-free link to the newest file — the one to give for "what's my feed URL?" (an rss
+    file's items carry <company:symbol> and <category> for syndication partners). `last_build_status` is written,
     unchanged (same rows as the last file, so no new file), empty, too_large (over 500k
     rows), schema_drift (columns no longer match the saved schema — re-draft and re-save
     under the same name) or failed.

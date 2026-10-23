@@ -244,6 +244,11 @@ async def list_realtime_events(
     if market_cap:
         body["market_cap"] = market_cap
     events = _ok(await _send(ctx, "POST", "/get-realtime-events", json=body))
+    # report_inputs is the report-generation config (~27 KB/event against ~700 chars of
+    # payload, 2026-10-23); agents never use it, so only report_inputs_key is passed on.
+    for event in events if isinstance(events, list) else []:
+        if isinstance(event, dict):
+            event.pop("report_inputs", None)
     return RealtimeEventsResult(events=events)
 
 

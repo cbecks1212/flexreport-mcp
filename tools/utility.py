@@ -1,11 +1,14 @@
 """Utility tools: async task polling, parameter-option catalogues, symbol onboarding, billing."""
 
+import os
 from typing import Annotated, Literal, Optional, get_args
 
 from mcp.server.fastmcp import Context
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from client import API_BASE_URL
 from core import mcp, _send, _ok
 from schemas.utility import (
     BillingLinkResult,
@@ -71,6 +74,11 @@ assert set(get_args(_OptionKind)) == set(_OPTION_ENDPOINTS)
 assert set(_OPTION_QUERY_PARAMS) <= set(_OPTION_ENDPOINTS)
 
 
+# A task result past this size is refused rather than buffered: explore results are
+# unbounded by design, and a 67 MB one OOM-killed the proxy on 2026-10-20 (127 MB on 09-10).
+MAX_TASK_RESULT_BYTES = int(os.environ.get("MCP_MAX_TASK_RESULT_BYTES", str(8_000_000)))
+
+
 @mcp.tool(
     annotations=ToolAnnotations(title="Get Async Task Status", readOnlyHint=True),
     # structured_output=False: results can be very large (base64 PDFs, task results
@@ -86,11 +94,23 @@ async def get_task_status(
 
     Returns {"task_id": ..., "status": ..., "result": ...}. `status` is one of
     PENDING, SUCCESS, FAILURE, RETRY. `result` is populated once status is SUCCESS.
+
+    A result over ~8 MB is not returned (it would take the server down): the call errors
+    with the backend URL holding the full result. Re-run the job scoped narrower (tickers,
+    dates, a row limit in the wording) instead of polling it again.
     """
-    return _ok(await _send(
+    resp = await _send(
         ctx, "GET", "/task-status",
-        params={"task_id": task_id}, require_auth=False,
-    ))
+        params={"task_id": task_id}, require_auth=False, max_bytes=MAX_TASK_RESULT_BYTES,
+    )
+    if isinstance(resp, dict) and "too_large_bytes" in resp:
+        raise ToolError(
+            f"Task {task_id} finished, but its result is over {MAX_TASK_RESULT_BYTES // 1_000_000} MB — too large to "
+            f"return here. Don't poll it again. The full result is at {API_BASE_URL}/task-status?task_id={task_id} "
+            "for a direct API client; otherwise re-run the job scoped narrower (tickers, dates, a row limit in the "
+            "wording) — explore returns ALL rows."
+        )
+    return _ok(resp)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List Valid Parameter Options", readOnlyHint=True))
