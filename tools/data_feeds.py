@@ -3,8 +3,10 @@ user's own scheduled datasets (/draft-custom-dataset, /save-user-dataset, /list-
 /delete-user-data-feed) and the rows of their published files (get_user_dataset_file)."""
 
 import csv
+import html
 import io
 import json
+import re
 import xml.etree.ElementTree as ET
 from typing import Annotated, Any, Literal, Optional
 
@@ -272,6 +274,8 @@ async def draft_custom_dataset(
 ) -> DraftCustomDatasetDispatch:
     """EVENT/NEWS FEEDS (filings, decks, earnings, news) — RESEARCH FIRST, then draft: 1) situate(question=<the user's words>), then get_event_ontology for the feed's event types to learn where each persists (`persisted_in`); 2) agree definitions with the user before drafting — universe, window, and what any loose term means (e.g. the proxy for "the AI trade"); 3) ONE SCOPED explore_data_catalogue census of company_event_node for the universe and window (tickers, dates, a row limit in the wording); 4) draft a request naming the table and column for each field, e.g. title from `earnings` figures, body from eight_k_timeseries_analysis.summary, link sec_link, guid company_event_node.node_id, pub_date occurred_at, ticker symbol_metadata.exchange || ':' || symbol; 5) refine with previous_draft_id + feedback, asking for ONE candidate when variants don't matter. PLAIN DATA FEEDS ("daily close and 20-day volume for AAPL, MSFT") skip all this and draft directly.
 
+    RESEARCH REPORTS ARE IN EVERY FEED BY DEFAULT: the build adds a `research_url` column to every row with a `symbol` or `ticker` column — a fixed, signed, sign-in-free link to that symbol's latest Flexreport research report PDF (rss/atom items show it as a "Research" link). Don't put report links or /get-cached-reports in the request or in a column; just keep a bare `symbol` (or `ticker`) column in the draft (a company_symbol / EXCHANGE:TICKER column alone gets no research link).
+
     Drafts the user's OWN dataset — a table built from Flexreport data on a schedule and published as a file (parquet, csv, tsv, json, jsonl, xlsx, xml, or an rss/atom feed) behind a fixed link — from a plain-English description. Step 1 of 2: draft (and refine) here, then save_user_dataset schedules it. Use when the user wants a custom data feed or a recurring file of their own ("build me a daily file of...", "an RSS feed of...", "a JSON feed I can poll"); for Flexreport's published feeds use download_dataset, and for a one-off look at the data use explore_data_catalogue. This is THE tool for any request worded as a "datafeed" or "feed" — never substitute schedule_task, an emailed workflow or a one-off file. Every column comes from stored data, and that includes the summaries and analysis Flexreport already stores (deck, press-release and 8-K summaries, key figures, flags, recommendations, research views), so a feed with summary columns is still a dataset; only new written analysis generated fresh each run is a schedule_task workflow (a transform step).
 
     Asynchronous: returns {draft_id, task_id, status: "PENDING"}. Poll task_id with
@@ -381,6 +385,12 @@ async def save_user_dataset(
       every ticker.
     - The channel carries the title "Flexreport Finance: <name>" and one `<copyright>`
       line; each item's description ends with a "Source: Flexreport Finance" line.
+    - Each item's description carries a "Research: Flexreport Finance research report"
+      link to its `research_url` (atom: a rel="related" link as well).
+
+    Every format gets a `research_url` column when the query returns `symbol` or `ticker`:
+    a fixed, signed link (no sign-in) serving that symbol's latest research report PDF,
+    added at build after the review. A query that already returns `research_url` keeps its own.
     - JSON source links are unwrapped to their URL.
 
     Confirm the name and schedule with the user before calling. Any valid cron is accepted
@@ -457,7 +467,9 @@ async def list_user_datasets(
     latest_url, files: [{run_date, published_at, url}]}]}. `latest_url` is the fixed,
     sign-in-free link to the newest file — the one to give for "what's my feed URL?" (an rss
     file's items carry <company:symbol> and <category> for syndication partners). To read a
-    file's rows (a dashboard, a summary), call get_user_dataset_file. `last_build_status` is written,
+    file's rows (a dashboard, a summary), call get_user_dataset_file. Rows with a symbol or
+    ticker carry `research_url`, a sign-in-free link to that symbol's latest research report
+    PDF — give it as the report link. `last_build_status` is written,
     unchanged (same rows as the last file, so no new file), empty, too_large (over 500k
     rows), schema_drift (columns no longer match the saved schema — re-draft and re-save
     under the same name) or failed.
@@ -485,6 +497,15 @@ _RSS_COMPANY_NS = "{http://purl.org/rss/1.0/modules/company}"
 _ATOM_NS = "{http://www.w3.org/2005/Atom}"
 
 
+# the writer's "<p>Research: <a href="...">...</a></p>" line in an rss item's description
+_RSS_RESEARCH_LINK = re.compile(r'Research:\s*<a href="([^"]+)"')
+
+
+def _rss_research_url(description: Optional[str]) -> Optional[str]:
+    match = _RSS_RESEARCH_LINK.search(description or "")
+    return html.unescape(match.group(1)) if match else None
+
+
 def _parse_dataset_file(fmt: str, body: bytes) -> tuple[list[dict[str, Any]], Optional[str]]:
     """(rows, published_at) from a published dataset file, as the backend's writers lay it out."""
     text = body.decode("utf-8")
@@ -507,21 +528,23 @@ def _parse_dataset_file(fmt: str, body: bytes) -> tuple[list[dict[str, Any]], Op
             "guid": item.findtext("guid"),
             "categories": [c.text for c in item.findall("category")],
             "company_symbols": [s.text for s in item.findall(f"{_RSS_COMPANY_NS}symbol")],
+            "research_url": _rss_research_url(item.findtext("description")),
         } for item in channel.findall("item")]
         return rows, channel.findtext("lastBuildDate")
     else:  # atom
         root = ET.fromstring(body)
         rows = []
         for entry in root.findall(f"{_ATOM_NS}entry"):
-            link = entry.find(f"{_ATOM_NS}link")
+            links = {l.get("rel", "alternate"): l.get("href") for l in entry.findall(f"{_ATOM_NS}link")}
             rows.append({
                 "title": entry.findtext(f"{_ATOM_NS}title"),
-                "link": link.get("href") if link is not None else None,
+                "link": links.get("alternate"),
                 "description": entry.findtext(f"{_ATOM_NS}content") or entry.findtext(f"{_ATOM_NS}summary"),
                 "pub_date": entry.findtext(f"{_ATOM_NS}updated"),
                 "guid": entry.findtext(f"{_ATOM_NS}id"),
                 "categories": [c.get("term") for c in entry.findall(f"{_ATOM_NS}category")],
                 "company_symbols": [],
+                "research_url": links.get("related"),
             })
         return rows, root.findtext(f"{_ATOM_NS}updated")
     # json / jsonl / csv / tsv rows carry the build's published_at column
@@ -547,7 +570,8 @@ async def get_user_dataset_file(
 
     Fetches the file server-side and parses json, jsonl, csv, tsv, xml, rss and atom files
     into rows; rss/atom come back one row per item {title, link, description, pub_date,
-    guid, categories, company_symbols}. parquet and xlsx files can't be parsed here: give
+    guid, categories, company_symbols, research_url}. `research_url` (every format, rows
+    with a ticker) is a sign-in-free link to the symbol's latest research report PDF. parquet and xlsx files can't be parsed here: give
     the user latest_url instead.
 
     Returns {dataset_name, format, version, published_at, row_count, rows}. Quote
