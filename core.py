@@ -65,6 +65,19 @@ mcp = FastMCP(
 )
 
 
+# Every backend response is streamed and refused past this size instead of buffered:
+# explore and task results are unbounded by design, and a 67 MB one OOM-killed the
+# 512 MB proxy on 2026-10-20 (127 MB on 09-10). A tool can pass a tighter max_bytes.
+MAX_RESPONSE_BYTES = int(os.environ.get("MCP_MAX_RESPONSE_BYTES", str(16_000_000)))
+
+
+def _too_large(resp: Any) -> int | None:
+    """The byte count `_send` stopped at when it refused an oversized response, else None."""
+    if isinstance(resp, dict) and isinstance(resp.get("detail"), dict):
+        return resp["detail"].get("too_large_bytes")
+    return None
+
+
 def _inbound_request(ctx: Context):
     """Best-effort fetch of the inbound Starlette Request from the MCP context."""
     return getattr(ctx.request_context, "request", None)
@@ -88,9 +101,9 @@ async def _send(
     With `raw=True`, a 2xx response's body is returned as bytes (for binary endpoints
     like a PDF download) instead of being parsed as JSON.
 
-    With `max_bytes`, the body is streamed and abandoned once it passes that size, so an
-    unbounded result (the 67 MB / 127 MB task results behind the OOM kills) never
-    reaches memory; the call returns an error carrying `too_large_bytes` instead.
+    Every body is streamed and abandoned once it passes `max_bytes` (default
+    MAX_RESPONSE_BYTES), so an unbounded result never reaches memory; the call then
+    returns a "result too large" error whose detail carries `too_large_bytes`.
 
     Errors (missing auth, transport failure, non-2xx) are returned as a dict with
     an "error" key rather than raised, so the agent receives a clean, readable message.
@@ -101,14 +114,12 @@ async def _send(
         return {"error": str(e)}
 
     try:
-        if max_bytes is None:
-            resp = await get_client().request(method, path, headers=headers, **kwargs)
-        else:
-            resp = await _request_capped(method, path, headers, max_bytes, **kwargs)
-            if isinstance(resp, int):
-                return {"error": f"Backend response is over the {max_bytes // 1_000_000} MB limit "
-                                 f"(read {resp // 1_000_000}+ MB before stopping)",
-                        "too_large_bytes": resp}
+        cap = max_bytes or MAX_RESPONSE_BYTES
+        resp = await _request_capped(method, path, headers, cap, **kwargs)
+        if isinstance(resp, int):
+            return {"error": f"Result too large (over {cap // 1_000_000} MB): narrow the query — fewer "
+                             "tickers, a shorter date window, or a row limit in the wording",
+                    "detail": {"too_large_bytes": resp, "limit_bytes": cap}}
     except httpx.HTTPError as e:
         return {"error": f"Request to backend failed: {e}"}
 
@@ -132,7 +143,8 @@ async def _send(
 
 
 async def _request_capped(method: str, path: str, headers: dict, max_bytes: int, **kwargs: Any) -> httpx.Response | int:
-    """The response with its body read, or the bytes read so far once the body passes max_bytes."""
+    """The response with its body read, or the bytes read so far once the body passes max_bytes.
+    `path` may be an absolute URL (a dataset file link), which overrides the backend base URL."""
     async with get_client().stream(method, path, headers=headers, **kwargs) as resp:
         declared = int(resp.headers.get("content-length") or 0)
         if declared > max_bytes and "content-encoding" not in resp.headers:
