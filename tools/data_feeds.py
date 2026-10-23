@@ -274,7 +274,7 @@ async def draft_custom_dataset(
 ) -> DraftCustomDatasetDispatch:
     """EVENT/NEWS FEEDS (filings, decks, earnings, news) — RESEARCH FIRST, then draft: 1) situate(question=<the user's words>), then get_event_ontology for the feed's event types to learn where each persists (`persisted_in`); 2) agree definitions with the user before drafting — universe, window, and what any loose term means (e.g. the proxy for "the AI trade"); 3) ONE SCOPED explore_data_catalogue census of company_event_node for the universe and window (tickers, dates, a row limit in the wording); 4) draft a request naming the table and column for each field, e.g. title from `earnings` figures, body from eight_k_timeseries_analysis.summary, link sec_link, guid company_event_node.node_id, pub_date occurred_at, ticker symbol_metadata.exchange || ':' || symbol; 5) refine with previous_draft_id + feedback, asking for ONE candidate when variants don't matter. PLAIN DATA FEEDS ("daily close and 20-day volume for AAPL, MSFT") skip all this and draft directly.
 
-    RESEARCH REPORTS ARE IN EVERY FEED BY DEFAULT: the build adds a `research_url` column to every row with a `symbol` or `ticker` column — a fixed, signed, sign-in-free link to that symbol's latest Flexreport research report PDF (rss/atom items show it as a "Research" link). Don't put report links or /get-cached-reports in the request or in a column; just keep a bare `symbol` (or `ticker`) column in the draft (a company_symbol / EXCHANGE:TICKER column alone gets no research link).
+    RESEARCH REPORTS ARE IN EVERY FEED BY DEFAULT: the build adds a `research_url` column to every row with a `symbol` or `ticker` column — a fixed, signed, sign-in-free link that serves the research report PDF behind that item (rss/atom items show it as a "Research" link). Don't put report links or /get-cached-reports in the request or in a column; just keep a bare `symbol` (or `ticker`) column in the draft (a company_symbol / EXCHANGE:TICKER column alone gets no research link). That link is ONLY for the feed's readers (redistribution): never call it, build one, or offer it as a way to download a report — the user gets reports through get_latest_report, and Flexreport's daily files through download_dataset.
 
     Drafts the user's OWN dataset — a table built from Flexreport data on a schedule and published as a file (parquet, csv, tsv, json, jsonl, xlsx, xml, or an rss/atom feed) behind a fixed link — from a plain-English description. Step 1 of 2: draft (and refine) here, then save_user_dataset schedules it. Use when the user wants a custom data feed or a recurring file of their own ("build me a daily file of...", "an RSS feed of...", "a JSON feed I can poll"); for Flexreport's published feeds use download_dataset, and for a one-off look at the data use explore_data_catalogue. This is THE tool for any request worded as a "datafeed" or "feed" — never substitute schedule_task, an emailed workflow or a one-off file. Every column comes from stored data, and that includes the summaries and analysis Flexreport already stores (deck, press-release and 8-K summaries, key figures, flags, recommendations, research views), so a feed with summary columns is still a dataset; only new written analysis generated fresh each run is a schedule_task workflow (a transform step).
 
@@ -387,11 +387,17 @@ async def save_user_dataset(
       line; each item's description ends with a "Source: Flexreport Finance" line.
     - Each item's description carries a "Research: Flexreport Finance research report"
       link to its `research_url` (atom: a rel="related" link as well).
+    - JSON source links are unwrapped to their URL.
 
     Every format gets a `research_url` column when the query returns `symbol` or `ticker`:
-    a fixed, signed link (no sign-in) serving that symbol's latest research report PDF,
-    added at build after the review. A query that already returns `research_url` keeps its own.
-    - JSON source links are unwrapped to their URL.
+    a fixed, signed link (no sign-in) serving the research report PDF behind that item,
+    added at build after the review. It exists ONLY so the feed's readers (syndication
+    partners, the owner's subscribers) can open the research without a Flexreport account:
+    never call it, build one, or offer it as a download route (reports for the user come
+    from get_latest_report, Flexreport's daily files from download_dataset). The link is
+    the entitlement: anyone holding the feed can open the reports in it, and deleting the
+    dataset kills every link it published. When the user plans to share the feed, tell
+    them that anyone holding it can open the reports in it.
 
     Confirm the name and schedule with the user before calling. Any valid cron is accepted
     (hourly, every 30 minutes, ranges), but one expression can't give each hour a different
@@ -468,8 +474,9 @@ async def list_user_datasets(
     sign-in-free link to the newest file — the one to give for "what's my feed URL?" (an rss
     file's items carry <company:symbol> and <category> for syndication partners). To read a
     file's rows (a dashboard, a summary), call get_user_dataset_file. Rows with a symbol or
-    ticker carry `research_url`, a sign-in-free link to that symbol's latest research report
-    PDF — give it as the report link. `last_build_status` is written,
+    ticker carry `research_url`, the feed readers' sign-in-free research link — never call
+    it or offer it as a download (the user's own reports come from get_latest_report).
+    `last_build_status` is written,
     unchanged (same rows as the last file, so no new file), empty, too_large (over 500k
     rows), schema_drift (columns no longer match the saved schema — re-draft and re-save
     under the same name) or failed.
@@ -571,8 +578,10 @@ async def get_user_dataset_file(
     Fetches the file server-side and parses json, jsonl, csv, tsv, xml, rss and atom files
     into rows; rss/atom come back one row per item {title, link, description, pub_date,
     guid, categories, company_symbols, research_url}. `research_url` (every format, rows
-    with a ticker) is a sign-in-free link to the symbol's latest research report PDF. parquet and xlsx files can't be parsed here: give
-    the user latest_url instead.
+    with a ticker) is the feed readers' research link: show it as part of the item, but
+    never fetch it or offer it as a way to download a report (get_latest_report is the
+    user's route). parquet and xlsx files can't be parsed here: give the user latest_url
+    instead.
 
     Returns {dataset_name, format, version, published_at, row_count, rows}. Quote
     `published_at` as the data's as-of. A file over the server's size cap errors instead
