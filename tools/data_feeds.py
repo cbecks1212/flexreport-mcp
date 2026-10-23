@@ -1,7 +1,11 @@
 """Data feed tools: Flexreport's versioned daily dataset files (/download-dataset) and the
 user's own scheduled datasets (/draft-custom-dataset, /save-user-dataset, /list-user-datasets,
-/delete-user-data-feed)."""
+/delete-user-data-feed) and the rows of their published files (get_user_dataset_file)."""
 
+import csv
+import io
+import json
+import xml.etree.ElementTree as ET
 from typing import Annotated, Any, Literal, Optional
 
 from mcp.server.fastmcp import Context
@@ -9,7 +13,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from core import mcp, _send, _ok
+from core import mcp, _send, _ok, _request_capped, MAX_RESPONSE_BYTES
 from schemas.data_feeds import (
     DatasetFormat,
     DeleteUserDataFeedResult,
@@ -17,6 +21,7 @@ from schemas.data_feeds import (
     DraftCustomDatasetDispatch,
     ListUserDatasetsResult,
     SaveUserDatasetResult,
+    UserDatasetFileResult,
 )
 
 
@@ -257,8 +262,7 @@ async def draft_custom_dataset(
     ] = None,
     sample_rows: Annotated[
         int,
-        Field(description="Rows of each candidate returned as a sample (the backend returns at most 5).",
-              ge=1, le=100),
+        Field(description="Rows of each candidate returned as a sample (at most 5).", ge=1, le=5),
     ] = 5,
     target_format: Annotated[
         Optional[DatasetFormat],
@@ -266,7 +270,9 @@ async def draft_custom_dataset(
                           "feed item (title, link, description, pub_date, guid), newest first. Omit when unknown."),
     ] = None,
 ) -> DraftCustomDatasetDispatch:
-    """Draft the user's OWN dataset — a table built from Flexreport data on a schedule and published as a file (parquet, csv, tsv, json, jsonl, xlsx, xml, or an rss/atom feed) behind a fixed link — from a plain-English description. Step 1 of 2: draft (and refine) here, then save_user_dataset schedules it. Use when the user wants a custom data feed or a recurring file of their own ("build me a daily file of...", "an RSS feed of...", "a JSON feed I can poll"); for Flexreport's published feeds use download_dataset, and for a one-off look at the data use explore_data_catalogue. This is THE tool for any request worded as a "datafeed" or "feed" — never substitute schedule_task, an emailed workflow or a one-off file. RESEARCH BEFORE DRAFTING: situate + get_event_ontology for the feed's event types (`persisted_in`), resolve the definitions with the user (universe, window, proxies — ask, don't guess), ONE scoped explore_data_catalogue census over company_event_node, then send an INFORMED request naming the table and column behind each field — a vague one-line request drafts label-like titles and missing links. Every column comes from stored data, and that includes the summaries and analysis Flexreport already stores (deck, press-release and 8-K summaries, key figures, flags, recommendations, research views), so a feed with summary columns is still a dataset; only new written analysis generated fresh each run is a schedule_task workflow (a transform step).
+    """EVENT/NEWS FEEDS (filings, decks, earnings, news) — RESEARCH FIRST, then draft: 1) situate(question=<the user's words>), then get_event_ontology for the feed's event types to learn where each persists (`persisted_in`); 2) agree definitions with the user before drafting — universe, window, and what any loose term means (e.g. the proxy for "the AI trade"); 3) ONE SCOPED explore_data_catalogue census of company_event_node for the universe and window (tickers, dates, a row limit in the wording); 4) draft a request naming the table and column for each field, e.g. title from `earnings` figures, body from eight_k_timeseries_analysis.summary, link sec_link, guid company_event_node.node_id, pub_date occurred_at, ticker symbol_metadata.exchange || ':' || symbol; 5) refine with previous_draft_id + feedback, asking for ONE candidate when variants don't matter. PLAIN DATA FEEDS ("daily close and 20-day volume for AAPL, MSFT") skip all this and draft directly.
+
+    Drafts the user's OWN dataset — a table built from Flexreport data on a schedule and published as a file (parquet, csv, tsv, json, jsonl, xlsx, xml, or an rss/atom feed) behind a fixed link — from a plain-English description. Step 1 of 2: draft (and refine) here, then save_user_dataset schedules it. Use when the user wants a custom data feed or a recurring file of their own ("build me a daily file of...", "an RSS feed of...", "a JSON feed I can poll"); for Flexreport's published feeds use download_dataset, and for a one-off look at the data use explore_data_catalogue. This is THE tool for any request worded as a "datafeed" or "feed" — never substitute schedule_task, an emailed workflow or a one-off file. Every column comes from stored data, and that includes the summaries and analysis Flexreport already stores (deck, press-release and 8-K summaries, key figures, flags, recommendations, research views), so a feed with summary columns is still a dataset; only new written analysis generated fresh each run is a schedule_task workflow (a transform step).
 
     Asynchronous: returns {draft_id, task_id, status: "PENDING"}. Poll task_id with
     get_task_status until SUCCESS — a draft takes about 45 s-4 min (validation, planning, a
@@ -289,9 +295,8 @@ async def draft_custom_dataset(
     build time): refine it with feedback asking to rename the column.
 
     To refine, call again with the SAME `request`, previous_draft_id=<draft_id> and
-    `feedback` carrying concrete fixes ("title = company name + fiscal period + EPS vs
-    estimate", "link = sec_link"); ask for "ONE candidate" when the variants don't matter.
-    Each round is a new draft with its own draft_id. Ask before saving: name,
+    `feedback`; ask for "ONE candidate" when the variants don't matter. Each round is a
+    new draft with its own draft_id. Ask before saving: name,
     schedule, and (if not the suggestion) date mode.
 
     Rate-limited to 20 drafts per hour per user. Requires auth (your MCP client attaches
@@ -356,25 +361,27 @@ async def save_user_dataset(
 ) -> SaveUserDatasetResult:
     """Save a drafted candidate as the user's scheduled dataset (step 2 of 2, after draft_custom_dataset): its query, the schema it produces, the file format, the date mode and a cron schedule. Each build publishes a new file only when the rows changed; list_user_datasets returns the files.
 
-    Every build is reviewed before it publishes: an LLM checks each NEW item for being
-    intelligible, actionable, complete, relevant and internally consistent. It can correct
-    text from stored sources (a cut-off sentence, a fiscal period missing from a title, a
-    figure confirmed by the event graph), add a one-line caveat, or hold an item out of
-    the file (junk, misattributed, off-topic or materially wrong). Links, GUIDs, tickers
-    and dates are never changed, and no figure is published that isn't in the stored data
-    — so a file can hold fewer rows than the query returns, and text can differ slightly
-    from the draft sample.
+    New items are reviewed before publishing, up to 40 per build. On a large first build
+    the rest publish as queried and are reviewed on later builds; a review that fails
+    publishes the items as queried. The review can correct text from stored sources (a
+    cut-off sentence, a fiscal period missing from a title), add a one-line caveat, or hold
+    an item out of the file (junk, misattributed, off-topic, materially wrong). Links,
+    GUIDs, tickers and dates are never changed, and no figure is published that isn't in
+    the stored data. So a file can hold fewer rows than the query returns, and an item
+    already published unreviewed can later be corrected or withdrawn when its review runs.
 
-    RSS files carry what syndication partners (e.g. Newstex) read:
+    RSS files (format="rss"; Atom is unchanged) carry what syndication partners (e.g.
+    Newstex) read:
     - `<company:symbol>EXCHANGE:TICKER</company:symbol>` per item, from a `company_symbol`
       / `ticker_exchange` column, else from `symbol` plus its listed exchange; non-US
       venue suffixes are dropped (BARC.L -> LSE:BARC).
-    - Up to 10 `<category>` tags, from `categories`, `category`, `event_type`,
+    - Up to 10 `<category>` tags per item, from `categories`, `category`, `event_type`,
       `document_type`, `doc_type`, `sector` and `industry`.
     - One item per guid: a document listed under several tickers is one story carrying
       every ticker.
-    - Channel title "Flexreport Finance: <name>", a copyright line and a source line;
-      JSON source links are unwrapped to their URL.
+    - The channel carries the title "Flexreport Finance: <name>" and one `<copyright>`
+      line; each item's description ends with a "Source: Flexreport Finance" line.
+    - JSON source links are unwrapped to their URL.
 
     Confirm the name and schedule with the user before calling. Any valid cron is accepted
     (hourly, every 30 minutes, ranges), but one expression can't give each hour a different
@@ -392,8 +399,9 @@ async def save_user_dataset(
     placeholder_id_to_poll, build_task_id}.
     - `latest_url` is a FIXED link to the newest file with no sign-in (the link itself is
       the key): give it to the user as THE feed URL — for an RSS reader, a syndication
-      partner's poller (rss items carry <company:symbol> and <category>), Excel / Google
-      Sheets web import, or another platform's poller. It returns 404 until the first
+      partner's poller (rss items carry <company:symbol> and up to 10 <category>), Excel /
+      Google Sheets web import, or another platform's poller. A dashboard reads the
+      published file through get_user_dataset_file, never a replay of `saved_query_id`. It returns 404 until the first
       build writes a file; with build_now that usually takes minutes.
     - `feed_fields` (rss/atom only) shows which column fills each item field {title, link,
       description, pub_date, guid}; tell the user if one fell back (null).
@@ -437,16 +445,19 @@ async def list_user_datasets(
 ) -> ListUserDatasetsResult:
     """List the user's own saved datasets (from save_user_dataset) with their build status and download links to the published files.
 
-    Every build is reviewed before it publishes: each NEW item can be corrected from stored
-    sources, given a one-line caveat, or held out of the file (links, GUIDs, tickers and
-    dates are never changed). So `last_row_count` / a file can hold fewer rows than the
-    query returns, and text can differ slightly from the draft sample.
+    New items are reviewed before publishing, up to 40 per build (on a large first build
+    the rest publish as queried and are reviewed on later builds; a failed review publishes
+    the items as queried). The review can correct text from stored sources, add a one-line
+    caveat, or hold an item out; links, GUIDs, tickers and dates are never changed. So a
+    file can hold fewer rows than the query returns, and an item already published
+    unreviewed can later be corrected or withdrawn.
 
     Returns {count, datasets: [{name, user_request, output_schema, file_format,
     date_mode, cron, task_name, last_built_at, last_build_status, last_row_count,
     latest_url, files: [{run_date, published_at, url}]}]}. `latest_url` is the fixed,
     sign-in-free link to the newest file — the one to give for "what's my feed URL?" (an rss
-    file's items carry <company:symbol> and <category> for syndication partners). `last_build_status` is written,
+    file's items carry <company:symbol> and <category> for syndication partners). To read a
+    file's rows (a dashboard, a summary), call get_user_dataset_file. `last_build_status` is written,
     unchanged (same rows as the last file, so no new file), empty, too_large (over 500k
     rows), schema_drift (columns no longer match the saved schema — re-draft and re-save
     under the same name) or failed.
@@ -465,6 +476,137 @@ async def list_user_datasets(
     if end_date:
         params["end_date"] = end_date
     return _ok(await _send(ctx, "GET", "/list-user-datasets", params=params))
+
+
+# Formats get_user_dataset_file can turn into rows; parquet and xlsx are binary and go to
+# the user as a link instead.
+_READABLE_FORMATS = ("json", "jsonl", "csv", "tsv", "xml", "rss", "atom")
+_RSS_COMPANY_NS = "{http://purl.org/rss/1.0/modules/company}"
+_ATOM_NS = "{http://www.w3.org/2005/Atom}"
+
+
+def _parse_dataset_file(fmt: str, body: bytes) -> tuple[list[dict[str, Any]], Optional[str]]:
+    """(rows, published_at) from a published dataset file, as the backend's writers lay it out."""
+    text = body.decode("utf-8")
+    if fmt == "json":
+        rows = json.loads(text)
+    elif fmt == "jsonl":
+        rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+    elif fmt in ("csv", "tsv"):
+        rows = list(csv.DictReader(io.StringIO(text), delimiter="," if fmt == "csv" else "\t"))
+    elif fmt == "xml":
+        root = ET.fromstring(body)
+        return [{child.tag: child.text for child in row} for row in root.findall("row")], root.get("published_at")
+    elif fmt == "rss":
+        channel = ET.fromstring(body).find("channel")
+        rows = [{
+            "title": item.findtext("title"),
+            "link": item.findtext("link"),
+            "description": item.findtext("description"),
+            "pub_date": item.findtext("pubDate"),
+            "guid": item.findtext("guid"),
+            "categories": [c.text for c in item.findall("category")],
+            "company_symbols": [s.text for s in item.findall(f"{_RSS_COMPANY_NS}symbol")],
+        } for item in channel.findall("item")]
+        return rows, channel.findtext("lastBuildDate")
+    else:  # atom
+        root = ET.fromstring(body)
+        rows = []
+        for entry in root.findall(f"{_ATOM_NS}entry"):
+            link = entry.find(f"{_ATOM_NS}link")
+            rows.append({
+                "title": entry.findtext(f"{_ATOM_NS}title"),
+                "link": link.get("href") if link is not None else None,
+                "description": entry.findtext(f"{_ATOM_NS}content") or entry.findtext(f"{_ATOM_NS}summary"),
+                "pub_date": entry.findtext(f"{_ATOM_NS}updated"),
+                "guid": entry.findtext(f"{_ATOM_NS}id"),
+                "categories": [c.get("term") for c in entry.findall(f"{_ATOM_NS}category")],
+                "company_symbols": [],
+            })
+        return rows, root.findtext(f"{_ATOM_NS}updated")
+    # json / jsonl / csv / tsv rows carry the build's published_at column
+    stamps = [str(r["published_at"]) for r in rows if isinstance(r, dict) and r.get("published_at")]
+    return rows, max(stamps) if stamps else None
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="Get User Dataset File", readOnlyHint=True),
+    # structured_output=False: a whole file of rows would be sent twice (text + structuredContent).
+    structured_output=False,
+)
+async def get_user_dataset_file(
+    ctx: Context,
+    dataset_name: Annotated[str, Field(description="The dataset's `name`, as list_user_datasets shows it.")],
+    version: Annotated[
+        Optional[str],
+        Field(description="Omit for the newest file. Else a build date (YYYY-MM-DD, its newest file) or a file's "
+                          "exact `published_at` from list_user_datasets."),
+    ] = None,
+) -> UserDatasetFileResult:
+    """Read the rows of one of the user's saved datasets AS PUBLISHED — the file behind its latest_url, or a dated version. THIS is how a dashboard or an answer reads a dataset: the published file is reviewed at publish, point-in-time, and the same bytes every consumer gets. Never replay the dataset's saved query instead (run_saved_query re-runs live SQL: different rows, no review). A claude.ai artifact can't reach flexreportfinapi.com itself, so its page calls this tool.
+
+    Fetches the file server-side and parses json, jsonl, csv, tsv, xml, rss and atom files
+    into rows; rss/atom come back one row per item {title, link, description, pub_date,
+    guid, categories, company_symbols}. parquet and xlsx files can't be parsed here: give
+    the user latest_url instead.
+
+    Returns {dataset_name, format, version, published_at, row_count, rows}. Quote
+    `published_at` as the data's as-of. A file over the server's size cap errors instead
+    of returning — use the user's own reader on latest_url for that one.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    """
+    params: dict[str, Any] = {"dataset_name": dataset_name, "latest_only": True}
+    if version:
+        params.update(start_date=version[:10], end_date=version[:10], latest_only=len(version) == 10)
+    listing = _ok(await _send(ctx, "GET", "/list-user-datasets", params=params))
+    dataset = next((d for d in listing.get("datasets") or [] if d.get("name") == dataset_name), None)
+    if dataset is None:
+        raise ToolError(f"No dataset named {dataset_name!r}; list_user_datasets shows the user's datasets.")
+    fmt = dataset.get("file_format")
+    if fmt not in _READABLE_FORMATS:
+        raise ToolError(f"{dataset_name} is published as {fmt}, which can't be parsed here; give the user its "
+                        f"latest_url: {dataset.get('latest_url')}")
+
+    if version:
+        files = dataset.get("files") or []
+        match = next((f for f in files if version in (f.get("published_at"), f.get("run_date"))), None)
+        if match is None:
+            raise ToolError(f"{dataset_name} has no file for version {version!r}; list_user_datasets(dataset_name=..., "
+                            "latest_only=false) lists its versions.")
+        url = match["url"]
+    else:
+        url = dataset.get("latest_url")
+        if not url:
+            raise ToolError(f"{dataset_name} has no latest_url yet.")
+
+    # No Authorization header: latest_url is keyed by its own signature, and a presigned S3
+    # link rejects a second auth mechanism.
+    try:
+        resp = await _request_capped("GET", url, {}, MAX_RESPONSE_BYTES)
+    except Exception as e:
+        raise ToolError(f"Could not fetch {dataset_name}'s file: {e}")
+    if isinstance(resp, int):
+        raise ToolError(f"{dataset_name}'s file is over {MAX_RESPONSE_BYTES // 1_000_000} MB, too large to return "
+                        "here; give the user its latest_url for their own reader.")
+    if resp.status_code == 404:
+        raise ToolError(f"{dataset_name} has no published file yet (last_build_status: "
+                        f"{dataset.get('last_build_status')}); the first build writes it.")
+    if resp.status_code >= 400:
+        raise ToolError(f"Fetching {dataset_name}'s file returned HTTP {resp.status_code}.")
+
+    try:
+        rows, published_at = _parse_dataset_file(fmt, resp.content)
+    except Exception as e:
+        raise ToolError(f"Could not parse {dataset_name}'s {fmt} file: {e}")
+    return UserDatasetFileResult(
+        dataset_name=dataset_name,
+        format=fmt,
+        version=version or "latest",
+        published_at=published_at,
+        row_count=len(rows),
+        rows=rows,
+    )
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Delete User Data Feed", readOnlyHint=False, destructiveHint=True, idempotentHint=True))

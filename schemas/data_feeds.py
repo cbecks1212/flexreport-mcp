@@ -108,6 +108,18 @@ class ListUserDatasetsResult(BaseModel):
     datasets: list[UserDataset]
 
 
+class UserDatasetFileResult(BaseModel):
+    dataset_name: str
+    format: str = Field(description="The file's format: json, jsonl, csv, tsv, xml, rss or atom.")
+    version: str = Field(description="\"latest\", or the run_date / published_at of the file that was read.")
+    published_at: Optional[str] = Field(None, description="When the file was published (UTC) — quote it as the data's as-of.")
+    row_count: int
+    rows: list[dict[str, Any]] = Field(
+        description="The file's rows as published. rss/atom: one row per item {title, link, description, pub_date, "
+                    "guid, categories, company_symbols}."
+    )
+
+
 class DeleteUserDataFeedResult(BaseModel):
     model_config = ConfigDict(extra="allow")
 
