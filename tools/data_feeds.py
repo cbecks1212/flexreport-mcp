@@ -1,4 +1,4 @@
-"""Data feed tools: Flexreport's versioned daily dataset files (/download-dataset) and the
+"""Data feed tools: Flexreport's versioned daily dataset files (/download-flexreport-dataset) and the
 user's own scheduled datasets (/draft-custom-dataset, /save-user-dataset, /list-user-datasets,
 /delete-user-data-feed) and the rows of their published files (get_user_dataset_file)."""
 
@@ -179,7 +179,7 @@ async def download_dataset(
         else:
             body["event_types"] = list(event_types)
 
-    resp = await _send(ctx, "POST", "/download-dataset", json=body)
+    resp = await _send(ctx, "POST", "/download-flexreport-dataset", json=body)
     if isinstance(resp, dict) and "HTTP 429" in str(resp.get("error", "")):
         raise ToolError(
             "download_dataset's limit is 3 calls per week per user and it has been used up (or the plan's "
@@ -188,7 +188,7 @@ async def download_dataset(
         )
     rows = _ok(resp)
     if not isinstance(rows, list):
-        raise ToolError(f"Unexpected /download-dataset response: {str(rows)[:500]}")
+        raise ToolError(f"Unexpected /download-flexreport-dataset response: {str(rows)[:500]}")
 
     if feed.get("returns") == "download_links":
         shape = "download_links"
