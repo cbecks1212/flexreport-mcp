@@ -1,4 +1,4 @@
-"""PDF report tools: cached report pulls, plan inventory, full rebuilds, research reports, PDF templates."""
+"""PDF report tools: latest-report pulls, plan inventory, on-demand notes, research reports, PDF templates."""
 
 import base64
 from typing import Annotated, Any, Literal, Optional
@@ -22,8 +22,8 @@ from schemas.pdf_reports import (
 
 
 # The fields that shape a CUSTOM company report — Report.OVERRIDE_FIELDS on the backend.
-# Setting any of them turns /create-full-report into a custom build (~10 min, never
-# saved) and the backend rejects them (422) unless `user_override` is also true.
+# Setting any of them steers /create-full-report's note toward those items, and the
+# backend rejects them (422) unless `user_override` is also true.
 _REPORT_SHAPING_FIELDS = (
     "financial_items", "as_reported_financial_items", "ratios", "revenue_segment",
     "technical_analysis_items", "estimate_items", "institutional_ownership",
@@ -34,10 +34,11 @@ _REPORT_SHAPING_FIELDS = (
 @mcp.tool(annotations=ToolAnnotations(title="Generate Stock Report", readOnlyHint=False, destructiveHint=False))
 async def generate_report_for_stock(
     ctx: Context,
-    ticker: Annotated[str, Field(description="The ONE ticker to rebuild, e.g. \"SNOW\".")],
+    ticker: Annotated[str, Field(description="The ONE ticker to write a new note for, e.g. \"SNOW\".")],
     user_override: Annotated[
         bool,
-        Field(description="CUSTOM mode switch (build around the shaping fields, not saved). Set automatically "
+        Field(description="CUSTOM mode switch (steer the note toward the shaping fields; it still replaces the "
+                          "symbol's report). Set automatically "
                           "whenever any shaping field is non-empty."),
     ] = False,
     financial_items: Annotated[
@@ -89,26 +90,28 @@ async def generate_report_for_stock(
                           "window at the SAME period end, so the basis must be explicit."),
     ] = None,
 ) -> StockReportResult:
-    """FULL REBUILD of ONE ticker's report (~10 minutes). Use sparingly — never the first call.
+    """Write a NEW research note for ONE ticker, now (a few minutes). Never the first call.
 
-    The fast path is `get_latest_report([ticker])`: a symbol with a fresh saved report
-    plan comes back under `rendering` and is rendered into the user's template in
-    ~10-20 s; any other symbol comes back with its cached PDF and a `stale` flag. This
-    tool re-runs the whole pipeline — brief, query planning, SQL, formatting — so it
-    is for rebuilds only, in one of two modes:
+    The fast path is `get_latest_report([ticker])`: every material event already writes
+    the symbol's report as it happens, so it usually exists and comes back in seconds
+    with a `stale` flag. This tool writes a new one on demand: the platform's analyst
+    researches the symbol's latest episode with its own tools (event web, intraday
+    tape, technicals, situate, at most one data exploration), states the platform's
+    official stance, and writes the note. The note REPLACES the symbol's report: later
+    `get_latest_report` calls return it, and `report_plan` subscribers are notified when
+    it lands. Two modes:
 
-    STANDARD (ticker only, ~10 min): rebuilds the symbol's report plan from its latest
-    event and SAVES it, so later `get_latest_report` calls render it in seconds. Call it
-    ONLY after `get_latest_report` returned the ticker with `stale: true` or in
-    `missing`, and the user wants the rebuilt report rather than the cached one — tell
-    them it takes ~10 minutes before you start it. NEVER for a symbol that came back in
-    `rendering` (that render already is the fresh report), and never fanned out across a
-    list of names.
+    STANDARD (ticker only): call it ONLY after `get_latest_report` returned the ticker
+    with `stale: true` or in `missing`, and the user wants a current report rather than
+    the cached one — tell them it takes a few minutes before you start it. If
+    `latest_event_at` is only minutes old, that event's own report is probably still
+    being written: wait for its `report_plan` frame (or call get_latest_report again in
+    a few minutes) instead. Never fan it out across a list of names.
 
-    CUSTOM (`user_override=true` + the shaping fields, ~10 minutes, NOT saved): a full
-    build from scratch around named line items, ratios, segments, indicators,
-    estimates, or holders. Bespoke asks usually do NOT belong here. The better route for
-    "a report on X covering Y":
+    CUSTOM (`user_override=true` + the shaping fields, a few minutes; like STANDARD it
+    replaces the symbol's report): the same note, told to cover named line items,
+    ratios, segments, indicators, estimates, or holders. Bespoke asks usually do NOT
+    belong here. The better route for "a report on X covering Y":
       1. EXPLORE the items the user named — `list_saved_queries` first, then
          `explore_data_catalogue` (after `situate` when the ask is event-driven);
       2. IDEATE with the user over the result sets — what to keep, cut, add, compare;
@@ -116,8 +119,8 @@ async def generate_report_for_stock(
          the markup to lay the content out in with your own document tooling (no
          template saved -> offer `draft_user_template`).
     That is faster, iterative, and the user sees the data before it is set in a PDF.
-    Use CUSTOM mode only when the user explicitly wants the Flexreport pipeline's own
-    report rebuilt around those items and accepts the ~10 minute wait. Every parameter
+    Use CUSTOM mode only when the user explicitly wants the Flexreport note written
+    around those items and accepts the few-minute wait. Every parameter
     after `user_override` shapes a custom report, and the backend rejects it (422)
     without `user_override=true` — this tool sets the switch for you whenever any of
     them is non-empty, so a shaped request is never silently served the standard
@@ -149,9 +152,11 @@ async def generate_report_for_stock(
     very clear list of what to cover.
 
     Asynchronous. Returns {"<TICKER>": {"task_id": "...", "status": "PENDING"}}: read
-    result[ticker]["task_id"] and poll it with `get_task_status` until SUCCESS; the
-    result carries the finished report as {"pdf": "<base64>", ...}. Requires auth
-    (your MCP client attaches the OAuth bearer automatically).
+    result[ticker]["task_id"] and poll it with `get_task_status` until SUCCESS (a few
+    minutes). The task result is the note's saved plan, NOT the PDF: on SUCCESS call
+    get_latest_report([ticker]) for the document (it comes back `stale: false`). With a
+    `report_plan` subscription open, the ticker's frame says the same without polling.
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
     shaping: dict[str, Any] = {
         "financial_items": financial_items,
@@ -232,57 +237,54 @@ async def get_latest_report(
 
     ===> THIS IS THE DEFAULT, CORRECT TOOL whenever a user asks for "the report",
     "research", "the latest research", "analysis", "a writeup", or "the PDF" for a
-    ticker (e.g. "get me the latest research on SNOW"). It is the FAST path. For a
-    symbol with a FRESH saved report plan it does not hand back a pre-built PDF: it
-    pulls the plan itself — the JSON the platform saved when the symbol's latest
-    material event published (brief, queries, results, format map) — and renders it
-    straight into the user's template in ~10-20 s. Every other symbol comes back
-    with its cached PDF. ALWAYS call this before `generate_report_for_stock`, which
-    is a ~10 min full rebuild.
+    ticker (e.g. "get me the latest research on SNOW"). It is the FAST path, and it
+    only FETCHES: every material event writes the symbol's report as it happens, so
+    this returns the latest document in seconds, with metadata saying how current it
+    is. Nothing is built here. ALWAYS call this before `generate_report_for_stock`,
+    which writes a new note (a few minutes).
 
     If the user's intent is an OPEN-ENDED or exploratory QUESTION rather than a request
     for this existing report, do NOT use this tool — default to `explore_data_catalogue`
     (fast, interactive), and reach for `generate_research_report` only when the user
     EXPLICITLY asks for a full deep-dive writeup. A BESPOKE report ("the SNOW report,
-    but built around product revenue and RPO") is not a rebuild either: explore the
+    but built around product revenue and RPO") is not a new note either: explore the
     items the user named, ideate with them on the result sets, and lay the agreed
     results out in their template (`get_user_template`) with your own document tooling.
 
     Accepts one OR many symbols. Returns
     {"result":    [{"symbol": "AAPL", "url": "<presigned pdf url>",
                     "report": "<base64 pdf>", "generated_at": "<iso utc>",
-                    "age_hours": 5.2, "latest_event_at": "<iso>", "stale": true}, ...],
+                    "age_hours": 5.2, "latest_event_at": "<iso>", "stale": true,
+                    "template": "default"}, ...],
      "missing":   ["XYZ", ...],
-     "rendering": {"PLAY": {"task_id": "...", "status": "PENDING", "symbol": "PLAY"}}}
-    Every symbol lands in exactly ONE of the three. A `result` hit carries BOTH
+     "stale_symbols": ["AAPL", ...],
+     "rendering": {}}
+    Every symbol lands in exactly ONE of `result` / `missing`; `stale_symbols` lists the
+    `result` symbols flagged `stale: true`; `rendering` is always empty (kept for older
+    clients). `template` is "user" when the PDF is the caller's own copy in their saved
+    template, "default" for the platform layout. A `result` hit carries BOTH
     representations of the same PDF: `url` is a short-lived presigned link (valid
     ~6h) — hand it to the user to download/open the document directly (and prefer it
     on clients that can't handle a large base64 blob); `report` is the inline base64
     PDF — decode it to read, render, or summarize the report's contents yourself.
     Split a list longer than 100 symbols across calls.
 
-    READ ALL THREE BEFORE YOU HAND ANYTHING OVER. Nothing regenerates on its own:
-      in `rendering` -> the symbol's saved plan is fresh and is being rendered into the
-                        user's template (~10-20 s). Poll get_task_status(task_id); the
-                        finished result carries {"pdf": "<base64>", ...} — hand the
-                        user THAT. Never call generate_report_for_stock for it: the
-                        render already is the fresh report.
-      stale: false   -> the cached PDF reflects the symbol's latest report inputs. Serve it.
-      stale: true    -> the saved plan itself is out of date (a print, a filing, a 13F
-                        refresh landed after it; `latest_event_at` says when), so there
-                        is nothing fresh to render. Hand over the stale PDF with that
-                        caveat and offer generate_report_for_stock(ticker) — a full
-                        rebuild, ~10 min. Start it when the user wants the refreshed
-                        report; never fan rebuilds out across a list of names unasked.
+    READ EACH SYMBOL'S FLAG BEFORE YOU HAND ANYTHING OVER:
+      stale: false   -> the PDF reflects the symbol's latest event. Serve it.
+      stale: true    -> an event landed after this PDF (`latest_event_at` says when).
+                        If that was only minutes ago, the event's own report is probably
+                        still being written: say so, and fetch again in a few minutes
+                        (or wait for its `report_plan` frame). Otherwise hand over the
+                        PDF with that caveat and offer generate_report_for_stock(ticker),
+                        which writes a new note in a few minutes. Start it when the user
+                        wants it; never fan it out across a list of names unasked.
       stale: null    -> no report inputs are known for the symbol, so freshness cannot
                         be judged. Serve the PDF and quote `generated_at` / `age_hours`.
-      in `missing`   -> no plan to render and no cached PDF. generate_report_for_stock(ticker)
-                        builds the first one (~10 min, saved so later calls here render
-                        it in seconds) — say so before starting it — or `onboard_symbol`
-                        if the ticker is not covered.
-    To see which symbols have a fresh plan READY to render — by the event that
-    triggered it, across the universe, before anything is pulled — use
-    `list_available_reports`: it lists saved plans, not cached PDFs.
+      in `missing`   -> no report yet. generate_report_for_stock(ticker) writes the first
+                        one (a few minutes; later calls here return it) — say so before
+                        starting it — or `onboard_symbol` if the ticker is not covered.
+    To see which symbols have a CURRENT report — by the event that produced it, across
+    the universe, before anything is pulled — use `list_available_reports`.
 
     Rate-limited to 500/hour. Requires auth (your MCP client attaches the OAuth bearer
     automatically).
@@ -304,13 +306,13 @@ async def list_available_reports(
     report_date: Annotated[
         Optional[str],
         Field(description="Lower bound on when the plan was built, YYYY-MM-DD (default today). Earlier dates "
-                          "widen the window and cost more; plans stay renderable for 7 days. A malformed date "
+                          "widen the window and cost more; plans stay listed for 7 days. A malformed date "
                           "is a 422."),
     ] = None,
 ) -> ReportPlansResult:
     """List the symbols with a report plan SAVED on or after `report_date` (default: TODAY) —
-    the real-time research get_latest_report can render right now, and whether each renders
-    in seconds or needs a rebuild.
+    the real-time research get_latest_report can hand over right now, and whether each is
+    current or has a newer event since.
 
     A plan is saved the moment a material event publishes for a symbol (eps_update,
     eps_release, 8k_release, financials_release, ir_publication, transcript_update) and
@@ -322,17 +324,17 @@ async def list_available_reports(
                   "fresh": true,           # see below
                   "source": "redis"}, ...]}  # redis = built within 3 days, s3 = older durable copy
     `fresh` applies the SAME rule get_latest_report (/get-cached-reports) applies:
-      fresh: true  -> get_latest_report([ticker]) renders this plan into the user's
-                      template in ~10-20 s (it comes back under `rendering`). These are
-                      the names to pull.
-      fresh: false -> a newer event landed after the plan; get_latest_report returns the
-                      stale cached PDF, and only generate_report_for_stock(ticker) — a full
-                      rebuild, ~10 min — refreshes it. Say so before the user waits on it.
+      fresh: true  -> the report get_latest_report([ticker]) returns was written from
+                      this plan and reflects the latest event. These are the names to pull.
+      fresh: false -> a newer event landed after the plan. Its own report may still be in
+                      progress (minutes); otherwise get_latest_report returns the older PDF
+                      flagged stale, and generate_report_for_stock(ticker) writes a new
+                      note in a few minutes. Say so before the user waits on it.
       not listed   -> no plan IN THE WINDOW. An empty result does not mean there is no
                       research — it means nothing was planned in the window. Widen
                       `report_date` before concluding a symbol has no plan; only then is
-                      a first build a full ~10 min run (or `onboard_symbol` if the ticker
-                      is not covered).
+                      a first generate_report_for_stock note (a few minutes) the answer
+                      (or `onboard_symbol` if the ticker is not covered).
 
     TWO WAYS IN:
       1) Event-first — list_realtime_events(event_type=...) shows what just published; call
@@ -341,7 +343,7 @@ async def list_available_reports(
          wants. (An event in the 12h cache with no plan here means the plan is still being
          built — check again in a minute.)
       2) Research-first — skip the events step: call this with no filter for every symbol
-         planned TODAY, grouped by the event that triggered it. Plans stay renderable for 7
+         planned TODAY, grouped by the event that triggered it. Plans stay listed for 7
          days, so pass report_date="YYYY-MM-DD" (e.g. 3 days back) when the user wants the
          running inventory rather than today's, or when today's list comes back thin.
 
@@ -363,12 +365,12 @@ async def list_available_reports(
          the candidates that appear, preferring `fresh: true`; `queued_at` should be the
          event you just read.
       e) PULL the winners — get_latest_report(symbols=[...]) for the few that survived,
-         not the whole list: the fresh ones render in seconds; a stale one comes back as
-         its cached PDF. Tell the user which is which, and offer generate_report_for_stock
-         rebuilds (~10 min each) only if they want to wait.
+         not the whole list: every one comes back in seconds, flagged fresh or stale.
+         Tell the user which is which, and offer generate_report_for_stock (a few minutes
+         each) only if they want to wait.
 
-    Not `get_latest_report`: that PULLS the reports for named tickers (renders the fresh
-    plans, serves the cached PDF for the rest). This tool answers "for which symbols could
+    Not `get_latest_report`: that PULLS the reports for named tickers (each one's latest
+    document). This tool answers "for which symbols could
     I get a fresh report?" — by event, across the universe — before anything is pulled. Not
     `generate_research_report`: that is the broad, topical, or multi-company writeup;
     the plans listed here are single-symbol, event-anchored reports.
@@ -561,9 +563,9 @@ async def save_user_template(
     before overwriting an existing format. To change a saved format afterwards, use
     `update_user_template` (any field, or none to recompile it as stored).
 
-    WHAT CHANGES AFTERWARDS: the backend renders every PDF it builds for this user —
-    `get_latest_report` renders of fresh plans, `generate_report_for_stock` rebuilds
-    (standard and custom) and scheduled reports — through the saved format. The template is a blueprint (stylesheet, page chrome, one
+    WHAT CHANGES AFTERWARDS: the backend lays out this user's reports in the saved
+    format — every event-time report gets a copy in their template (get_latest_report
+    serves it, `template: "user"`), as do scheduled reports. The template is a blueprint (stylesheet, page chrome, one
     pattern per content kind) applied to the document's own content: nothing is
     filled in by hand, and no other call changes. When you compose a PDF yourself
     from Flexreport data, `get_user_template` returns the markup to lay it out in.

@@ -74,8 +74,8 @@ async def schedule_task(
     - EXPENSIVE — max 2 per workflow, and the cron must use a literal minute and
       at most 4 literal hours (no sub-hourly / "*" fields): "screen-stocks"
       (`screen_stocks`), "generate-research-report" ({"query": "..."}),
-      "create-full-report" (a full ~10 min rebuild every run; {"ticker": "..."} for
-      the symbol's standard report;
+      "create-full-report" (writes a new note every run, a few minutes, replacing
+      the symbol's report; {"ticker": "..."} for the standard note;
       add "user_override": true plus the shaping lists `generate_report_for_stock`
       takes — financial_items, ratios, as_reported_financial_items, revenue_segment,
       technical_analysis_items, estimate_items, institutional_ownership CIKs — for a

@@ -88,7 +88,7 @@ async def get_task_status(
     ctx: Context,
     task_id: Annotated[str, Field(description="The task_id an async tool returned.")],
 ) -> TaskStatusResult:
-    """Poll the status of an async job (a get_latest_report `rendering` task, generate_report_for_stock, generate_research_report, explore_data_catalogue, explore_data_coverage, draft_custom_dataset, screen_stocks, ...).
+    """Poll the status of an async job (generate_report_for_stock, generate_research_report, explore_data_catalogue, explore_data_coverage, draft_custom_dataset, screen_stocks, ...).
 
     Returns {"task_id": ..., "status": ..., "result": ...}. `status` is one of
     PENDING, SUCCESS, FAILURE, RETRY. `result` is populated once status is SUCCESS.
@@ -222,8 +222,8 @@ async def list_sub_industries(
 # BLUEPRINT — the author's stylesheet and page chrome plus one markup pattern
 # per content kind (title, lead, sections, bullets, KPI cards, tables, charts,
 # figure, source line, footnote) — which the backend applies automatically to
-# every PDF it renders for that user (`get_latest_report` renders of fresh plans,
-# `generate_report_for_stock` rebuilds, scheduled reports). Nobody fills template
+# every report written for that user (each event-time report gets a copy in their
+# template, served by `get_latest_report`; scheduled reports too). Nobody fills template
 # markup: a template is structure and style;
 # the document supplies the content. A template is a visual choice, so the
 # flow is draft (rendered previews) -> the user looks and picks -> save the
@@ -237,7 +237,7 @@ async def list_sub_industries(
 # ideates with the user over the results, builds the PDF with its own document
 # tooling and, if the user has a saved template (`get_user_template`), lays the
 # content out in that format; if none is saved, it offers to draft one. A
-# custom `generate_report_for_stock` rebuild is the ~10 min exception.
+# custom `generate_report_for_stock` note is the exception.
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Onboard New Symbol", readOnlyHint=False, destructiveHint=False))

@@ -776,10 +776,11 @@ def situate_universe(
                          when="the user wants THE REPORTS on the names that stand out ('pull the most relevant "
                               "research today') — after the realtime results are read and the movers confirmed "
                               "(detect_intraday_outlier_jumps), never before",
-                         why="the inventory of saved report plans by triggering event: `fresh: true` renders via "
-                             "get_latest_report([ticker]) in ~10-20 s, false rebuilds via generate_report_for_stock for "
-                             "minutes. Lists plans built on or after report_date (default today): an empty list means "
-                             "nothing was planned in the window — widen report_date (plans render for 7 days) before "
+                         why="the inventory of saved report plans by triggering event: `fresh: true` means the report "
+                             "get_latest_report([ticker]) returns in seconds is current; false means a newer event landed "
+                             "(its report may be minutes away; otherwise generate_report_for_stock writes a new note). "
+                             "Lists plans built on or after report_date (default today): an empty list means nothing was "
+                             "planned in the window — widen report_date (plans are listed for 7 days) before "
                              "saying there is no research. Rank by the event (a filing or call AND a move), match to "
                              "plans, then pull only the winners"))
     skip.append(_skip("generate_research_report", None, "~10-12 minute job; not for a what-is-going-on question"))
