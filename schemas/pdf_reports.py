@@ -46,16 +46,20 @@ class CachedReport(BaseModel):
     stale: Optional[bool] = Field(
         None, description="True: the PDF predates the latest event. False: it reflects it. Null: freshness unknown."
     )
+    template: Optional[str] = Field(
+        None, description="\"user\": the caller's own copy in their saved template. \"default\": the platform layout."
+    )
 
 
 class CachedReportsResult(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     result: list[CachedReport] = Field(default_factory=list, description="Symbols served from the cached PDF.")
-    missing: list[str] = Field(default_factory=list, description="Symbols with no plan to render and no cached PDF.")
+    missing: list[str] = Field(default_factory=list, description="Symbols with no report written yet.")
+    stale_symbols: list[str] = Field(default_factory=list, description="The `result` symbols flagged stale: true.")
     rendering: dict[str, ReportTask] = Field(
         default_factory=dict,
-        description="Symbols whose fresh saved plan is rendering into the user's template, keyed by ticker.",
+        description="Always empty: reports are written at event time and nothing renders on fetch. Kept for older clients.",
     )
 
 
@@ -67,7 +71,7 @@ class ReportPlan(BaseModel):
     planned_at: Optional[str] = Field(None, description="When the plan was built (ISO).")
     queued_at: Optional[str] = Field(None, description="Timestamp of the report inputs (the event) the plan was built from.")
     fresh: Optional[bool] = Field(
-        None, description="True: get_latest_report renders it in ~10-20 s. False: a newer event landed; only a rebuild refreshes it."
+        None, description="True: the report get_latest_report returns reflects the latest event. False: a newer event landed since (its report may be in progress; otherwise generate_report_for_stock writes one)."
     )
     source: Optional[str] = Field(None, description="\"redis\" (built within 3 days) or \"s3\" (older durable copy).")
 

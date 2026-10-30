@@ -195,9 +195,10 @@ async def stream_events(
     "elapsed_seconds": n}. Each item in `events` is the same object `list_realtime_events` returns for that
     type ({event_type, symbol, payload, published_at, id}) — summary, thesis impact,
     significant changes, citations — the moment it publishes, no polling of the 12h
-    cache. There is NO PDF link on an event: for the research, POST the symbol to
-    get_latest_report (a fresh plan renders in ~10-20 s; stale/missing -> a
-    generate_report_for_stock rebuild, ticker only).
+    cache. There is NO PDF link on an event: the event's report lands a few minutes
+    later, announced on the `report_plan` topic, and get_latest_report([symbol]) then
+    returns it (stale or missing with no report on the way -> generate_report_for_stock,
+    ticker only).
 
     THE LOOP: a call returns after `max_events` matched events or `max_wait_seconds`
     (cap 55 s), whichever comes first — call it again to keep listening, and ALWAYS
@@ -214,9 +215,11 @@ async def stream_events(
       - a family from the same listing — earnings, news, market_movement,
         institutional_ownership, analyst_activity, strategy, prediction — which
         matches every type in it, including types added later;
-      - `report_plan` (stream-only): a frame each time a report plan is SAVED
-        ({symbol, event_type, planned_at, queued_at, plan_key}); the next step is
-        get_latest_report([symbol]), which finds the plan fresh and renders it.
+      - `report_plan` (stream-only): a frame each time a symbol's new report is
+        PUBLISHED — its document is already written ({symbol, event_type, planned_at,
+        queued_at, plan_key, report_key}); the next step is get_latest_report([symbol]),
+        which returns it (`stale: false`). Subscribe to it to stream research as it is
+        written.
     `symbols` (optional): tickers; 13f_* filer events carry the filer's CIK in the
     symbol slot. No topics and no symbols = everything. Unknown topic -> 422 with the
     allowed lists in `detail`.
@@ -311,10 +314,11 @@ async def stream_event_subscription(
     id and another user's id (indistinguishable by design).
 
     Acting on what arrives: an `event` item is the full realtime event (use it
-    directly); to hand over research, get_latest_report([symbol]) first (a fresh plan
-    renders in ~10-20 s; batch up to 50 symbols per call), and only if it comes back
-    stale/missing a generate_report_for_stock(ticker) rebuild. A `report_plan` item
-    means a plan was just saved: get_latest_report([symbol]) renders it fresh.
+    directly); to hand over research, get_latest_report([symbol]) first (it returns in
+    seconds; batch up to 50 symbols per call), and only if it comes back stale/missing
+    with no report on the way a generate_report_for_stock(ticker) note. A `report_plan`
+    item means the symbol's new report was just published: get_latest_report([symbol])
+    returns it.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     """

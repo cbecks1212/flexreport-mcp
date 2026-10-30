@@ -228,9 +228,10 @@ async def list_realtime_events(
     means the cache is cold for that event type (12h TTL), not that nothing happened.
 
     A material event here (eps_update, eps_release, 8k_release, financials_release,
-    ir_publication, transcript_update) means a report plan was saved for the symbol:
-    `list_available_reports(event_types=[<this type>])` says which of them
-    get_latest_report renders fresh in seconds.
+    ir_publication, transcript_update) means the symbol's report is being written from
+    it (within minutes; the `report_plan` topic announces each one):
+    `list_available_reports(event_types=[<this type>])` says which are already current,
+    and get_latest_report returns them in seconds.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
@@ -401,8 +402,8 @@ async def get_company_event_web(
          instead of a vague one.
       3. Feed the concrete events and dates into `explore_data_catalogue` /
          `generate_research_report` so the analysis is scoped to what actually
-         happened; for the company's own report, `get_latest_report` renders the plan
-         saved from that event.
+         happened; for the company's own report, `get_latest_report` returns the
+         document written from that event.
       4. Nothing here is a full payload — a headline is a pointer, never the content.
          Do not quote a headline as if it were the event.
 
