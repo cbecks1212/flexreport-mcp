@@ -218,14 +218,10 @@ async def generate_research_report(
     ))
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(title="Get Latest Cached Reports", readOnlyHint=True),
-    # structured_output=False: results can be very large (base64 PDFs, task results
-    # like the 127 MB one behind the 2026-09-10 OOM), and structured output would
-    # send them twice (text + structuredContent). The model is still the documented shape.
-    structured_output=False,
-)
-@compact_output
+# Structured since the backend dropped the inline base64 PDF (2026-11-02): a result is now
+# ~350 characters per symbol (link + freshness), where the base64 was 118K-744K and five
+# symbols came to 2.2M characters, so the payload no longer needs the unstructured path.
+@mcp.tool(annotations=ToolAnnotations(title="Get Latest Cached Reports", readOnlyHint=True))
 async def get_latest_report(
     ctx: Context,
     symbols: Annotated[
@@ -254,8 +250,8 @@ async def get_latest_report(
 
     Accepts one OR many symbols. Returns
     {"result":    [{"symbol": "AAPL", "url": "<presigned pdf url>",
-                    "report": "<base64 pdf>", "generated_at": "<iso utc>",
-                    "age_hours": 5.2, "latest_event_at": "<iso>", "stale": true,
+                    "generated_at": "<iso utc>", "age_hours": 5.2,
+                    "latest_event_at": "<iso>", "stale": true,
                     "template": "default"}, ...],
      "missing":   ["XYZ", ...],
      "stale_symbols": ["AAPL", ...],
@@ -263,12 +259,21 @@ async def get_latest_report(
     Every symbol lands in exactly ONE of `result` / `missing`; `stale_symbols` lists the
     `result` symbols flagged `stale: true`; `rendering` is always empty (kept for older
     clients). `template` is "user" when the PDF is the caller's own copy in their saved
-    template, "default" for the platform layout. A `result` hit carries BOTH
-    representations of the same PDF: `url` is a short-lived presigned link (valid
-    ~6h) — hand it to the user to download/open the document directly (and prefer it
-    on clients that can't handle a large base64 blob); `report` is the inline base64
-    PDF — decode it to read, render, or summarize the report's contents yourself.
-    Split a list longer than 100 symbols across calls.
+    template, "default" for the platform layout. Split a list longer than 100 symbols
+    across calls.
+
+    THE PDF IS BEHIND `url`, not in this response: a presigned link valid ~6h from this
+    call.
+      - To GIVE the user the report: hand them the link to open or download.
+      - To READ it yourself: download the link (an HTTP / web fetch, or
+        `curl -o <SYMBOL>.pdf "<url>"`) and open the PDF; a client that renders PDF
+        pages also sees the charts. Quote the report from what you read, not from the
+        metadata here.
+      - The link serves the symbol's report file as it is when fetched. After ~6h, or
+        to pick up a newer report, call this tool again for a fresh link; never edit
+        or build a URL.
+      - A client that cannot fetch a URL but can run code: download_pdf_from_url(url)
+        returns the same PDF as base64 to decode.
 
     READ EACH SYMBOL'S FLAG BEFORE YOU HAND ANYTHING OVER:
       stale: false   -> the PDF reflects the symbol's latest event. Serve it.
@@ -407,13 +412,14 @@ async def download_pdf_from_url(
 ) -> DownloadedPdf:
     """Fetch a presigned S3 PDF URL server-side and return the document as base64.
 
-    Use this to pull the actual PDF bytes for a presigned S3 link — e.g. the `url`
-    returned by `get_latest_report` — on clients that can't open the link directly and
-    need the document inline. The backend fetches the URL for you (clients never have
-    to reach S3) and streams the PDF back. Only S3 URLs are accepted: the host must end
-    in "amazonaws.com" and contain "s3"; any other host is rejected with a 400 (SSRF
-    guard). NOTE: if you already have `get_latest_report`'s `report` field (the same PDF
-    inline as base64), use that directly — there's no need to call this.
+    The FALLBACK for reading a report: `get_latest_report` returns only a presigned
+    `url`, and fetching that link yourself (an HTTP / web fetch) is the normal way to
+    read the PDF. Use this only when your client cannot reach the link but can run code
+    to decode base64 — the result is large (~120K characters for a 5-page note, ~750K
+    for a 20-page report with charts) and is no use to a model that cannot decode it.
+    The backend fetches the URL for you and streams the PDF back. Only S3 URLs are
+    accepted: the host must end in "amazonaws.com" and contain "s3"; any other host is
+    rejected with a 400 (SSRF guard).
 
     Returns {"file_name": ..., "media_type": "application/pdf", "report": "<base64 pdf>"}
     — decode `report` to read, render, or save the PDF.
