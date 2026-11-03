@@ -73,6 +73,19 @@ class SavedQueryReplayResult(BaseModel):
     results: list[SavedQueryReplay] = Field(description="One entry per query token, in the same order.")
 
 
+class CompanyFinancialsResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    symbol: str
+    financial_type: str = Field(description="The table read; pass it as trace_data_sources(relation=...) to cite a row.")
+    count: int = Field(description="Rows returned.")
+    rows: list[dict[str, Any]] = Field(
+        description="Newest period first. Standardized rows: date, fiscal_year, period, reported_currency, filing_date, "
+                    "accepted_date, symbol, statement, line_item, value, mapping (accession, XBRL inputs, formula), "
+                    "last_updated. As-filed rows carry concept, accession and filing_url."
+    )
+
+
 class TraceSourcesResult(BaseModel):
     """Polymorphic by relation: documents, citations (finest), or a cohort."""
 

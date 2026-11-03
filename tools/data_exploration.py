@@ -1,7 +1,7 @@
 """Data exploration tools: catalogue exploration, coverage, signed drilldowns, source tracing, saved queries."""
 
 import json
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 from urllib.parse import parse_qs, urlsplit
 
 from mcp.server.fastmcp import Context
@@ -11,6 +11,7 @@ from pydantic import Field
 
 from core import mcp, _send, _ok
 from schemas.data_exploration import (
+    CompanyFinancialsResult,
     DeleteSavedQueryResult,
     DocumentSectionResult,
     QueryRowsResult,
@@ -20,6 +21,98 @@ from schemas.data_exploration import (
     TaskDispatch,
     TraceSourcesResult,
 )
+
+
+FinancialType = Literal["edgar_quarterly_financials", "edgar_annual_financials", "edgar_10q_financials",
+                        "edgar_10k_financials", "edgar_eight_k", "edgar_financials_yoy_change_m"]
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Get Company Financial Statements", readOnlyHint=True))
+async def company_financials(
+    ctx: Context,
+    symbol: Annotated[str, Field(description="Covered ticker, e.g. \"MAR\".")],
+    financial_type: Annotated[
+        FinancialType,
+        Field(description="The table to read (default edgar_quarterly_financials). Standardized statements: "
+                          "edgar_quarterly_financials / edgar_annual_financials. As filed (XBRL facts with accession "
+                          "and filing_url): edgar_10q_financials / edgar_10k_financials — pass line_items. "
+                          "edgar_eight_k: financial tables from 8-Ks. edgar_financials_yoy_change_m: year-over-year "
+                          "change per line item."),
+    ] = "edgar_quarterly_financials",
+    limit: Annotated[
+        int,
+        Field(description="Most recent periods to return (1-12, default 5). 5 quarters include the same quarter "
+                          "last year; lower it only when the year-ago comparison is not wanted.", ge=1, le=12),
+    ] = 5,
+    line_items: Annotated[
+        Optional[list[str]],
+        Field(description="Only these line items (max 50). Standardized camelCase names for the standardized and "
+                          "growth tables, e.g. [\"revenue\", \"operatingIncome\", \"netIncome\", \"epsDiluted\", "
+                          "\"operatingCashFlow\", \"freeCashFlow\"]; XBRL concepts for the as-filed tables, e.g. "
+                          "[\"us-gaap_Revenues\"]. Not allowed for edgar_eight_k.", max_length=50),
+    ] = None,
+) -> CompanyFinancialsResult:
+    """A company's EDGAR financial statements, read directly — the targeted tool for "what did X report", revenue / EPS / margins / cash flow by quarter or year, and the tables a financials_release refreshes.
+
+    ===> Prefer this over explore_data_catalogue for one company's reported statements:
+    it is synchronous, takes seconds, and returns the rows directly. `situate` plans it
+    when an event refreshed one of these tables (the ontology's relation cards list it in
+    `read_by`), with the arguments to pass through unchanged.
+
+    TABLES (`financial_type`, each value is the table name):
+      edgar_quarterly_financials (default)  standardized quarterly statements
+      edgar_annual_financials               standardized annual statements
+      edgar_10q_financials / edgar_10k_financials
+                                            the facts AS FILED (XBRL concepts) with
+                                            accession and filing_url
+      edgar_eight_k                         financial tables extracted from 8-Ks
+      edgar_financials_yoy_change_m         year-over-year change per line item
+
+    PASS line_items. The standardized tables hold dozens of line items per period, the
+    as-filed tables hundreds of facts: an unfiltered edgar_10q_financials pull cost
+    28K-108K tokens in testing and was only ever made "for provenance". It is never
+    needed for that — cite a row with `trace_data_sources` (below) instead.
+
+    Rows come back newest period first. A standardized row is {date, fiscal_year, period,
+    reported_currency, filing_date, accepted_date, symbol, statement, line_item, value,
+    mapping, last_updated}; `mapping` holds the accession, filing date, XBRL inputs and the
+    formula. netIncome appears TWICE per quarter — once from the income statement, once
+    from the cash flow statement; read the `statement` column.
+
+    STALE YoY: edgar_financials_yoy_change_m refreshes after the transcript arrives and at
+    19:00 ET on weekdays, so on the evening of a print it can still show the PRIOR quarter.
+    Treat it as stale unless its current_period matches the latest date in
+    edgar_quarterly_financials, and compute the change from the 5 quarters there instead.
+
+    CITE A ROW: trace_data_sources(relation=<this financial_type>, keys=[{"symbol": "MAR",
+    "date": "2026-09-30", "statement": "income statement", "line_item": "epsDiluted"}])
+    returns the 10-Q / 10-K and its sec.gov link. For the YoY view the keys are symbol,
+    line_item and current_period.
+
+    US SEC filers only (the EDGAR side); a non-filer has no rows here — situate's
+    `source_routing` says which side a company is on. A 404 means the symbol is not
+    covered (onboard_symbol), a 422 a bad argument. Requires auth (your MCP client
+    attaches the OAuth bearer automatically).
+    """
+    body: dict[str, Any] = {"symbol": symbol.strip().upper(), "financial_type": financial_type, "limit": limit}
+    items = [i.strip() for i in line_items or [] if i and i.strip()]
+    if items:
+        if financial_type == "edgar_eight_k":
+            raise ToolError("edgar_eight_k has no line items to filter — omit line_items.")
+        body["line_items"] = items
+    rows = _ok(await _send(ctx, "POST", "/company-financials", json=body))
+    if not isinstance(rows, list):
+        raise ToolError(f"Unexpected /company-financials response: {str(rows)[:500]}")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row.pop("period_rank", None)  # the endpoint's internal DENSE_RANK
+        if isinstance(row.get("mapping"), str):
+            try:
+                row["mapping"] = json.loads(row["mapping"])
+            except ValueError:
+                pass
+    return CompanyFinancialsResult(symbol=body["symbol"], financial_type=financial_type, count=len(rows), rows=rows)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Explore Data Catalogue", readOnlyHint=False, destructiveHint=False))
@@ -32,6 +125,10 @@ async def explore_data_catalogue(
     ],
 ) -> TaskDispatch:
     """Explore Flexreport's data platform with an OPEN-ENDED question — designed to handle many research based or open ended questions, enabling interactive EDA.
+
+    ===> ONE company's reported statements (revenue, EPS, margins, cash flow by quarter
+    or year, what a 10-Q / 10-K / 8-K reported) are a direct read: `company_financials`,
+    synchronous, seconds — not a multi-minute job here.
 
     ===> BEFORE running this, call `list_saved_queries` and match the question against
     the saved rows — on each row's `metadata` (`summary`, `parameters`, `datasets`),
@@ -454,6 +551,12 @@ async def trace_data_sources(
     filing. A `reason` of "no_keys" means a column the join needs was missing
     from every key object — nearly always the period/date — not that the number is
     unsourced. Add the date and any other identifying column on the row, and re-call.
+
+    `company_financials` rows: relation = the row's financial_type; keys = symbol, date,
+    statement, line_item for the standardized tables, symbol, line_item, current_period
+    for edgar_financials_yoy_change_m. Which keys the as-filed edgar_10q / edgar_10k /
+    edgar_eight_k tables need is unresolved (whole rows return no_keys) — cite the
+    standardized row instead, or quote the as-filed row's own filing_url.
 
     `column` traces ONE column instead of the whole row — necessary for a YoY or
     change relation, where each value column resolves to a DIFFERENT filing (the

@@ -50,6 +50,36 @@ async def _realtime_event_corpus(ctx: Context) -> list[dict[str, Any]]:
     return rows
 
 
+# /situate-company: the fields situate.py reads, and nothing else. `read_by` is what turns
+# a refreshed table into a targeted plan step; informs_relations (large, unranked) is not used.
+_SITUATE_SECTIONS = ("web", "cards", "relations", "entailed", "episodes")
+_SITUATE_CARD_KEYS = ("family", "about", "persisted_in", "episodes", "deepened_by", "informs", "entails",
+                      "layer", "refreshed_by", "read_by")
+
+
+async def _situate_company(ctx: Context, symbol: str, window_days: Optional[int],
+                           event_type: Optional[str]) -> Any:
+    """One symbol's web + cards + routed relations from /situate-company (auth required).
+    `event_type` (the first type the question names) adds that card even with no node in
+    the window. Returns `_send`'s error dict on any failure; the caller falls back."""
+    params: dict[str, Any] = {"symbol": symbol, "sections": list(_SITUATE_SECTIONS),
+                              "include_keys": list(_SITUATE_CARD_KEYS), "include_fetch": "true"}
+    if window_days:
+        params["window_days"] = window_days
+    if event_type:
+        params["event_type"] = event_type
+    res = await _send(ctx, "GET", "/situate-company", params=params)
+    if isinstance(res, dict) and "error" in res and event_type and "422" in str(res.get("error")):
+        # an event type this backend's ontology does not know: the slice is still useful without its card
+        params.pop("event_type")
+        res = await _send(ctx, "GET", "/situate-company", params=params)
+    return res
+
+
+def _situate_ok(res: Any) -> bool:
+    return isinstance(res, dict) and "error" not in res and isinstance(res.get("web"), dict)
+
+
 @mcp.tool(annotations=ToolAnnotations(title="Situate: What Is Going On Right Now", readOnlyHint=True))
 async def situate(
     ctx: Context,
@@ -59,7 +89,7 @@ async def situate(
     ] = None,
     window_days: Annotated[
         Optional[int],
-        Field(description="Event-web look-back in days (backend default 7, max 90).", ge=1, le=90),
+        Field(description="Event-web look-back in days (default 14 for named symbols, max 90).", ge=1, le=90),
     ] = None,
     question: Annotated[
         Optional[str],
@@ -84,8 +114,8 @@ async def situate(
 
     It reads the company event web (what HAPPENED to this company), the event ontology
     (what that KIND of event entails, what follows it and how soon, where its payload
-    lives after the 12h realtime cache, when each table next refreshes) and market
-    status, and composes them into ONE response:
+    lives after the 12h realtime cache, when each table next refreshes, which tool reads
+    each table) and market status, and composes them into ONE response:
       market          exchange, is_open, session
       symbols[S]      web (newest 12 nodes; full graph via get_company_event_web),
                       newest_event, episode (the DOMINANT episode in the window — its
@@ -99,7 +129,9 @@ async def situate(
                       corpus (type, family, one-line description) so you never guess
       plan[]          ORDERED tool calls: {step, tool, args, why, auth, sync, optional,
                       provenance, fallback}. `tool` is an exact tool name and `args`
-                      are valid for it — pass them through unchanged.
+                      are valid for it — pass them through unchanged. A table that
+                      refreshed for the event is read with the tool its card names
+                      (company_financials for the EDGAR statements), not explore.
       skip[]          calls that would return nothing or waste a job (an event type
                       that aged out of the cache, a 10-minute report) — DO NOT make these.
       suggest[]       calls to make ONLY IF their `when` arises after the plan has run
@@ -123,38 +155,25 @@ async def situate(
          family) tell you what to call next.
     Skip this tool ONLY for pure enumeration (list_options), an explicit "get me the
     existing report" (get_latest_report), or a metric-history question with no event
-    in it ("Micron EPS growth over 8 quarters" -> explore_data_catalogue).
+    in it ("Micron EPS over 8 quarters" -> company_financials(symbol="MU", limit=8,
+    line_items=["epsDiluted"]); cross-company or non-statement history ->
+    explore_data_catalogue).
 
     degraded=true means a source was unavailable (ontology not built, a web errored);
     the plan still runs on what remains — follow it, and say what was unknown.
     """
     now = datetime.now(timezone.utc)
-    onto_task = _ontology_graph(ctx)
     market_task = _send(ctx, "GET", "/is-market-open", params={"exchange": "NYSE"}, require_auth=False)
     syms = [s.strip().upper() for s in (symbols or []) if s and s.strip()][:5]
-    corpus_task = _realtime_event_corpus(ctx) if not syms else asyncio.sleep(0, result=[])
-    web_tasks = [
-        _send(ctx, "GET", "/get-company-event-web",
-              params={"symbol": s, **({"window_days": window_days} if window_days else {})},
-              require_auth=False)
-        for s in syms
-    ]
-    onto, market_raw, corpus, *webs = await asyncio.gather(onto_task, market_task, corpus_task, *web_tasks)
+    if syms:
+        return await _situate_symbols(ctx, syms, window_days, question, now, market_task)
+    onto, market_raw, corpus = await asyncio.gather(_ontology_graph(ctx), market_task, _realtime_event_corpus(ctx))
 
     market = situate_mod.parse_market(market_raw)
     degraded: list[str] = []
     if market.get("error"):
         degraded.append(f"market status unavailable: {market['error']}")
-    if not isinstance(onto, dict) or "error" in onto or onto.get("degraded"):
-        degraded.append("event ontology unavailable — followers, freshness and persisted_in are unknown; "
-                        "plan built from the web's fetch hints only")
-        cards, relations, episodes, ttl, onto_as_of = {}, {}, {}, situate_mod.DEFAULT_TTL_HOURS, None
-    else:
-        cards = onto.get("event_types") or {}
-        relations = onto.get("relations") or {}
-        episodes = onto.get("episodes") or {}
-        ttl = int(onto.get("realtime_cache_ttl_hours") or situate_mod.DEFAULT_TTL_HOURS)
-        onto_as_of = onto.get("as_of")
+    cards, relations, episodes, ttl, onto_as_of = _ontology_parts(onto, degraded)
 
     # Route from what the question NAMES: realtime event types first (checked against the
     # live ontology when it is available), then the family. A miss is None, never a default.
@@ -165,22 +184,105 @@ async def situate(
     skip: list = []
     guidance: list = []
     symbol_blocks: dict[str, Any] = {}
-    universe_block = None
-    if syms:
-        for s, web in zip(syms, webs):
-            block, p, k, g = situate_mod.situate_symbol(
-                s, web, cards, relations, episodes, ttl, market, now, qfam, qtypes)
-            symbol_blocks[s] = block
-            plan += p; skip += k; guidance += g
-            if block.get("error"):
-                degraded.append(f"{s}: event web errored ({block['error']})")
-    else:
-        universe_block, p, k, g = situate_mod.situate_universe(
-            qfam, cards, episodes, market, now, qtypes, ttl, corpus)
-        plan += p; skip += k; guidance += g
+    universe_block, p, k, g = situate_mod.situate_universe(
+        qfam, cards, episodes, market, now, qtypes, ttl, corpus)
+    plan += p; skip += k; guidance += g
 
     return situate_mod.compose(
-        "symbol" if syms else "universe", market, ttl, now, symbol_blocks, universe_block,
+        "universe", market, ttl, now, symbol_blocks, universe_block,
+        plan, skip, guidance, degraded, onto_as_of,
+    )
+
+
+def _ontology_parts(onto: Any, degraded: list[str]) -> tuple[dict, dict, dict, int, Optional[str]]:
+    """(cards, relations, episodes, ttl, as_of) from the full /get-event-ontology payload."""
+    if not isinstance(onto, dict) or "error" in onto or onto.get("degraded"):
+        degraded.append("event ontology unavailable — followers, freshness and persisted_in are unknown; "
+                        "plan built from the web's fetch hints only")
+        return {}, {}, {}, situate_mod.DEFAULT_TTL_HOURS, None
+    return (onto.get("event_types") or {}, onto.get("relations") or {}, onto.get("episodes") or {},
+            int(onto.get("realtime_cache_ttl_hours") or situate_mod.DEFAULT_TTL_HOURS), onto.get("as_of"))
+
+
+async def _situate_symbols(ctx: Context, syms: list[str], window_days: Optional[int], question: Optional[str],
+                           now: datetime, market_task: Any) -> dict[str, Any]:
+    """Symbol scope. Each symbol's inputs come from ONE /situate-company call (auth required):
+    a 14-day, 200-node web deduped per event type and table, the cards present, and the
+    relations they entail routed to the company's EDGAR or FMP side. A symbol whose call
+    fails (signed out, backend not deployed, 5xx) falls back to the public pair this tool
+    used before — /get-company-event-web + the cached full ontology — so situate stays
+    usable without a login; the block's `source` says which path answered."""
+    # Question -> event types from the vocabulary alone (every entry is an ontology type,
+    # tests/test_situate_routing.py): the per-symbol slice only carries the cards present.
+    qtypes = situate_mod.question_event_types(question)
+    lead_type = qtypes[0] if qtypes else None
+    market_raw, *slices = await asyncio.gather(
+        market_task, *[_situate_company(ctx, s, window_days, lead_type) for s in syms])
+
+    market = situate_mod.parse_market(market_raw)
+    degraded: list[str] = []
+    if market.get("error"):
+        degraded.append(f"market status unavailable: {market['error']}")
+
+    failed = [s for s, sl in zip(syms, slices) if not _situate_ok(sl)]
+    legacy_webs: dict[str, Any] = {}
+    onto: Any = None
+    if failed:
+        onto, *webs = await asyncio.gather(_ontology_graph(ctx), *[
+            _send(ctx, "GET", "/get-company-event-web",
+                  params={"symbol": s, **({"window_days": window_days} if window_days else {})},
+                  require_auth=False)
+            for s in failed])
+        legacy_webs = dict(zip(failed, webs))
+
+    full_cards: dict[str, Any] = {}
+    full_relations: dict[str, Any] = {}
+    episodes: dict[str, Any] = {}
+    ttl: Optional[int] = None
+    onto_as_of: Optional[str] = None
+    if failed:
+        full_cards, full_relations, episodes, ttl, onto_as_of = _ontology_parts(onto, degraded)
+    for sl in slices:
+        if _situate_ok(sl):
+            episodes = episodes or sl.get("episodes") or {}
+            ttl = ttl or int(sl.get("realtime_cache_ttl_hours") or situate_mod.DEFAULT_TTL_HOURS)
+            onto_as_of = onto_as_of or sl.get("ontology_as_of")
+    ttl = ttl or situate_mod.DEFAULT_TTL_HOURS
+
+    # family of the question: cards from every slice (each holds the lead type's card)
+    union_cards = dict(full_cards)
+    for sl in slices:
+        if _situate_ok(sl):
+            union_cards.update(sl.get("cards") or {})
+    if full_cards:
+        qtypes = [t for t in qtypes if t in full_cards]
+    qfam = situate_mod.question_family(question, qtypes, union_cards)
+
+    plan: list = []
+    skip: list = []
+    guidance: list = []
+    symbol_blocks: dict[str, Any] = {}
+    for s, sl in zip(syms, slices):
+        if _situate_ok(sl):
+            block, p, k, g = situate_mod.situate_symbol(
+                s, sl["web"], sl.get("cards") or {}, sl.get("relations") or {}, episodes, ttl, market, now,
+                qfam, qtypes, entailed=sl.get("entailed") or [])
+            block["source"] = "situate-company"
+            for key in ("edgar_filer", "source_routing", "routed_out"):
+                if sl.get(key) not in (None, [], ""):
+                    block[key] = sl[key]
+        else:
+            block, p, k, g = situate_mod.situate_symbol(
+                s, legacy_webs.get(s), full_cards, full_relations,
+                episodes, ttl, market, now, qfam, qtypes)
+            block["source"] = f"event-web fallback ({str((sl or {}).get('error') if isinstance(sl, dict) else sl)[:120]})"
+        symbol_blocks[s] = block
+        plan += p; skip += k; guidance += g
+        if block.get("error"):
+            degraded.append(f"{s}: event web errored ({block['error']})")
+
+    return situate_mod.compose(
+        "symbol", market, ttl, now, symbol_blocks, None,
         plan, skip, guidance, degraded, onto_as_of,
     )
 

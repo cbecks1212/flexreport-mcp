@@ -22,6 +22,19 @@ Design notes (from the 2026-09-10 investor-deck outage):
 - ``explore_data_catalogue`` is never a plan step in ANY scope: the cache IS "today", and
   an unscoped explore over ``ir_documents`` was a 127 MB result that OOM-killed the proxy.
   It lives in ``suggest[]`` with the ``when`` under which the agent may reach for it.
+
+Design notes (from the 2026-11-02 /situate-company handover):
+- Per symbol, the inputs come from ONE backend call (/situate-company): a 14-day, 200-node
+  web deduped to the newest node per event type and per table, the cards of the types
+  present, the relation cards they entail, and ``entailed`` already routed to the EDGAR or
+  FMP side for that company. The plan is still built here.
+- A table that refreshed for the event and whose relation card ``read_by`` names a targeted
+  tool (``company_financials`` for the EDGAR tables) becomes a plan step for THAT tool and
+  leaves the combined explore suggestion. On MAR and nine 11-02 filers the agent then
+  used company_financials 15/15 times and explore 0 times.
+- A ``same_chain_run`` edge from a data_update node to an episode event is the signal that
+  the table reflects the print; "written after the anchor" is not (the EDGAR build is
+  recorded before the financials_release it publishes).
 """
 from __future__ import annotations
 
@@ -37,6 +50,11 @@ DEFAULT_TTL_HOURS = 12
 MAX_PLAN_STEPS = 8
 WEB_NODE_CAP = 12
 FRESHNESS_RELATION_CAP = 6
+# Extra freshness rows for tables a targeted tool reads (on top of the anchor card's 6),
+# and the most targeted-tool plan steps one symbol may add.
+TARGETED_RELATION_CAP = 6
+TARGETED_STEP_CAP = 3
+EXPLORE_TOOL = "explore_data_catalogue"
 
 # Tools the plan may emit. Names MUST match the @mcp.tool functions in server.py; server.py
 # asserts that at import so a rename fails loudly instead of emitting a dead hint.
@@ -56,7 +74,56 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "list_available_reports": {"auth": "required", "sync": True},
     "generate_report_for_stock": {"auth": "required", "sync": False},
     "generate_research_report": {"auth": "required", "sync": False},
+    "company_financials": {"auth": "required", "sync": True},
 }
+
+# ------------------------------------------------- targeted readers (read_by -> step)
+# Standardized line items a catch-up on a print needs; the same names work for the growth
+# view. limit=5 includes the same quarter last year (4 missed it in the handover tests).
+FINANCIALS_LINE_ITEMS: tuple[str, ...] = ("revenue", "operatingIncome", "netIncome", "epsDiluted",
+                                          "operatingCashFlow", "freeCashFlow")
+FINANCIALS_LIMIT = 5
+# As-filed fact tables -> the standardized table built from the same filing in the same
+# chain run. An unfiltered as-filed pull cost 28K-108K tokens per run in testing and was
+# only ever made "for provenance", which trace_data_sources answers, so the plan reads the
+# standardized twin instead.
+AS_FILED_TWINS: dict[str, str] = {"edgar_10q_financials": "edgar_quarterly_financials",
+                                  "edgar_10k_financials": "edgar_annual_financials"}
+YOY_VIEW = "edgar_financials_yoy_change_m"
+COMPANY_FINANCIALS_TYPES: tuple[str, ...] = ("edgar_quarterly_financials", "edgar_annual_financials",
+                                             "edgar_10q_financials", "edgar_10k_financials",
+                                             "edgar_eight_k", YOY_VIEW)
+
+
+def _company_financials_args(symbol: str, relation: str) -> Optional[dict[str, Any]]:
+    relation = AS_FILED_TWINS.get(relation, relation)
+    if relation not in COMPANY_FINANCIALS_TYPES:
+        return None
+    if relation == "edgar_eight_k":  # no line items; the newest filing is the print
+        return {"symbol": symbol, "financial_type": relation, "limit": 1}
+    return {"symbol": symbol, "financial_type": relation, "limit": FINANCIALS_LIMIT,
+            "line_items": list(FINANCIALS_LINE_ITEMS)}
+
+
+# tool -> (symbol, relation) -> args, or None when the tool cannot read that relation.
+# Only tools listed here are planned off a relation card's `read_by`; any other reader
+# (snapshot, strategies, ...) is already planned elsewhere or needs args situate lacks.
+TARGETED_ARGS: dict[str, Any] = {
+    "company_financials": _company_financials_args,
+}
+
+
+def targeted_reader(relation: str, relation_card: Optional[dict[str, Any]], symbol: str
+                    ) -> Optional[tuple[str, dict[str, Any]]]:
+    """(tool, args) for the first tool in the relation card's `read_by` that is registered,
+    is not explore_data_catalogue, and has an args builder — else None."""
+    for tool in (relation_card or {}).get("read_by") or []:
+        if tool == EXPLORE_TOOL or tool not in TOOL_REGISTRY or tool not in TARGETED_ARGS:
+            continue
+        args = TARGETED_ARGS[tool](symbol, relation)
+        if args:
+            return tool, args
+    return None
 
 # ------------------------------------------------------------ question routing
 # The realtime-event corpus: EVERY event type `list_realtime_events` can return, keyed by
@@ -148,7 +215,7 @@ _REACTION_FAMILIES = {"earnings", "news", "market_movement"}
 # informs family -> the one relation worth a freshness row (only when a card informs it).
 _INFORMS_PRIMARY = {"prices": "eod_stock_prices"}
 # Plan ordering weights.
-_CATEGORY_ORDER = {"payload": 0, "reaction": 1, "explore": 2, "context": 3}
+_CATEGORY_ORDER = {"payload": 0, "targeted": 1, "reaction": 2, "explore": 3, "context": 4}
 
 
 # --------------------------------------------------------------------------- helpers
@@ -328,16 +395,28 @@ def situate_symbol(
     now: datetime,
     question_fam: Optional[str] = None,
     asked_types: Optional[list[str]] = None,
+    entailed: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Return (symbols[S] block, plan steps, skip entries, guidance lines) for one symbol.
 
-    `asked_types` are the realtime event types the question named (question_event_types):
-    they pick the episode and lead the payload steps, so "OKTA's deck" reads ir_publication
-    before whatever the episode would otherwise put first."""
+    `asked_types` are the realtime event types the question named (question_event_types,
+    already checked against the known types by the caller): they pick the episode and lead
+    the payload steps, so "OKTA's deck" reads ir_publication before whatever the episode
+    would otherwise put first. `cards` may hold only the types present in the window (the
+    /situate-company slice), so an asked type without a card is still reported.
+
+    `entailed` is /situate-company's [{relation, via, routed_from?}] list, already routed
+    to the EDGAR or FMP side for this company: a card relation it renamed is read under
+    the routed name. None (the legacy /get-event-ontology path) routes nothing."""
     plan: list[dict[str, Any]] = []
     skip: list[dict[str, Any]] = []
     guidance: list[str] = []
-    asked = [t for t in (asked_types or []) if t in cards] if cards else list(asked_types or [])
+    asked = list(dict.fromkeys(asked_types or []))
+    route = {e["routed_from"]: e["relation"] for e in entailed or []
+             if e.get("routed_from") and e.get("relation")}
+
+    def routed(rel: Optional[str]) -> Optional[str]:
+        return route.get(rel, rel) if rel else rel
 
     # ---- degraded web -------------------------------------------------------------
     if not isinstance(web, dict) or "error" in web or web.get("degraded") or not web.get("nodes"):
@@ -451,24 +530,63 @@ def situate_symbol(
         at = parse_ts(n.get("at"))
         if at and (n["relation"] not in observed or at > observed[n["relation"]]):
             observed[n["relation"]] = at
+    # same_chain_run: a data_update written by the chain run that published an event of this
+    # episode (or any event at/after the anchor) reflects that event, whatever its timestamp.
+    node_by_id = {n.get("id"): n for n in nodes}
+    episode_types = set(membership.get(primary_ep or "", [])) | ({primary["type"]} if primary else set())
+    chain_linked: dict[str, dict[str, Any]] = {}  # relation -> linked event node
+    for e in web.get("edges") or []:
+        if e.get("cause") != "same_chain_run":
+            continue
+        a, b = node_by_id.get(e.get("from")), node_by_id.get(e.get("to"))
+        for u, ev in ((a, b), (b, a)):
+            if not u or not ev or u.get("kind") != "data_update" or ev.get("kind") != "event":
+                continue
+            ev_at = parse_ts(ev.get("at"))
+            if ev.get("type") in episode_types or (anchor_at and ev_at and ev_at >= anchor_at):
+                chain_linked.setdefault(u["relation"], ev)
     wanted: list[str] = []
     if primary_card:
         for layer in ("gold", "analysis", "silver"):
             for r in (primary_card.get("entails") or {}).get(layer) or []:
-                if r.get("relation") not in wanted:
-                    wanted.append(r["relation"])
+                rel = routed(r.get("relation"))
+                if rel and rel not in wanted:
+                    wanted.append(rel)
         for fam in primary_card.get("informs") or []:
             rel = _INFORMS_PRIMARY.get(fam)
             if rel and rel not in wanted:
                 wanted.append(rel)
-        if primary_card.get("persisted_in") and primary_card["persisted_in"] not in wanted:
-            wanted.insert(0, primary_card["persisted_in"])
+        persisted_primary = routed(primary_card.get("persisted_in"))
+        if persisted_primary and persisted_primary not in wanted:
+            wanted.insert(0, persisted_primary)
     wanted = wanted[:FRESHNESS_RELATION_CAP]
+    # Widened past the anchor card: tables a TARGETED tool reads (relation card read_by),
+    # written in the window or entailed by an episode member present in it. For MAR the
+    # anchor was eps_update, whose card names only `earnings`, so the EDGAR tables the
+    # financials_release wrote never got a row and no company_financials step was planned.
+    targeted_candidates: list[str] = [n["relation"] for n in updates]
+    targeted_candidates += [e["relation"] for e in entailed or [] if e.get("via") in episode_types]
+    for t in sorted(episode_types & set(newest_by_type)):
+        c = cards.get(t) or {}
+        targeted_candidates.append(routed(c.get("persisted_in")))
+        for layer, rels in (c.get("entails") or {}).items():
+            if layer != "realtime_events":
+                targeted_candidates += [routed(r.get("relation")) for r in rels or []]
+    extra = 0
+    for rel in dict.fromkeys(r for r in targeted_candidates if r):
+        if extra >= TARGETED_RELATION_CAP:
+            break
+        if rel not in wanted and targeted_reader(rel, relations.get(rel), symbol):
+            wanted.append(rel)
+            extra += 1
     freshness: list[dict[str, Any]] = []
     fresh_relations: list[str] = []
     for rel in wanted:
         card = relations.get(rel) or {}
         row: dict[str, Any] = {"relation": rel, "layer": card.get("layer")}
+        readers = [t for t in card.get("read_by") or [] if t != EXPLORE_TOOL]
+        if readers:
+            row["read_by"] = readers
         last: Optional[datetime] = observed.get(rel)
         basis = "observed" if last else None
         next_run: Optional[datetime] = None
@@ -490,7 +608,11 @@ def situate_symbol(
         row["last_refresh_at"] = iso(last)
         row["next_run_at"] = iso(next_run)
         row["basis"] = basis or "unknown"
-        if anchor_at and last:
+        linked = chain_linked.get(rel)
+        if linked:
+            row["reflects_newest_event"] = True
+            row["same_chain_run"] = f"{linked.get('type')} ({linked.get('id')}, {linked.get('at')})"
+        elif anchor_at and last:
             row["reflects_newest_event"] = last > anchor_at
         else:
             row["reflects_newest_event"] = None
@@ -526,7 +648,7 @@ def situate_symbol(
                               f"{t} (web {n['id']}, {n['at']}) is still inside the {ttl_hours}h realtime cache",
                               provenance="cache"))
             continue
-        persisted = card.get("persisted_in") or (n.get("fetch") or {}).get("relation")
+        persisted = routed(card.get("persisted_in") or (n.get("fetch") or {}).get("relation"))
         signed = None
         for u in updates:  # a data_update node for the durable relation with a signed drilldown
             if u["relation"] == persisted and (u.get("fetch") or {}).get("signed_query_url"):
@@ -543,13 +665,64 @@ def situate_symbol(
                                  when=f"the {t} drilldown above returned not-authenticated or errored",
                                  why=f"same {persisted} rows, planned from scratch — slower, so only if the drilldown fails",
                                  reads=[persisted]))
+        elif persisted and (reader := targeted_reader(persisted, relations.get(persisted), symbol)):
+            tool, args = reader
+            plan.append(_step("payload", tool, args,
+                              f"{t} payload (web {n['id']}). Aged out of the {ttl_hours}h cache; durable copy is "
+                              f"{persisted}, which {tool} reads directly (relation card read_by)",
+                              provenance="declared", reads=list(dict.fromkeys([persisted, args.get("financial_type") or persisted]))))
         elif persisted:
             explore_payloads.append((t, n, persisted))
     for t in expired:
-        persisted = (cards.get(t) or {}).get("persisted_in") or (newest_by_type[t].get("fetch") or {}).get("relation")
+        persisted = routed((cards.get(t) or {}).get("persisted_in") or (newest_by_type[t].get("fetch") or {}).get("relation"))
         skip.append(_skip("list_realtime_events", {"event_type": t, "tickers": [symbol]},
                           f"{t} aged out of the {ttl_hours}h cache ({newest_by_type[t]['at']}) — returns []. "
                           + (f"Payload lives in {persisted}." if persisted else "")))
+
+    # ---- plan: targeted readers of the tables that refreshed for the event --------------
+    # For each table that reflects the event, its relation card's read_by names the tool
+    # that reads it directly; that call replaces the table's share of the explore job.
+    planned_reads = {rel for st in plan for rel in st.get("reads") or []}
+    targeted_steps = 0
+    financials_planned = False
+    for row in freshness:
+        rel = row["relation"]
+        if not row.get("reflects_newest_event") or rel in planned_reads:
+            continue
+        reader = targeted_reader(rel, relations.get(rel), symbol)
+        if not reader:
+            continue
+        tool, args = reader
+        target = args.get("financial_type") or rel
+        if target in planned_reads:  # an as-filed table whose standardized twin is already planned
+            planned_reads.add(rel)
+            continue
+        if targeted_steps >= TARGETED_STEP_CAP:
+            break
+        why = (f"{rel} refreshed for {primary['type'] if primary else 'the event'}"
+               + (f" (same_chain_run with {row['same_chain_run']})" if row.get("same_chain_run")
+                  else f" (≈ {row.get('last_refresh_at')}, {row.get('basis')})")
+               + f"; {tool} reads it directly — no explore job")
+        if rel in AS_FILED_TWINS:
+            why += (f". {rel} holds the as-filed facts of the same filing: read the standardized {target} "
+                    "and cite with trace_data_sources instead of pulling the facts unfiltered")
+        plan.append(_step("targeted", tool, args, why, provenance="declared", reads=[rel, target]))
+        planned_reads |= {rel, target}
+        targeted_steps += 1
+        financials_planned = financials_planned or tool == "company_financials"
+        if target == YOY_VIEW:
+            guidance.append(f"{symbol}: {YOY_VIEW} refreshes after the transcript arrives and at 19:00 ET on weekdays; "
+                            "until then it shows the PRIOR quarter. Treat it as stale unless its current_period matches "
+                            "the latest date in edgar_quarterly_financials.")
+    if financials_planned:
+        skip.append(_skip("company_financials", {"symbol": symbol, "financial_type": "edgar_10q_financials"},
+                          "an unfiltered as-filed pull (28K-108K tokens) is never needed for provenance — "
+                          "trace_data_sources returns the filing. Pass line_items (XBRL concepts) if the as-filed facts "
+                          "themselves are wanted"))
+        guidance.append(f"{symbol}: to cite a company_financials row, call trace_data_sources(relation=<its financial_type>, "
+                        "keys=[{symbol, date, statement, line_item}]) — for edgar_financials_yoy_change_m the keys are "
+                        "{symbol, line_item, current_period}. It returns the 10-Q/10-K and its sec.gov link. netIncome appears "
+                        "twice per quarter (income statement and cash flow statement): use the `statement` column.")
 
     # ---- plan: reaction step ------------------------------------------------------------
     if primary and primary_family in _REACTION_FAMILIES and anchor_age_h is not None:
@@ -624,6 +797,11 @@ def situate_symbol(
     # ---- block ----------------------------------------------------------------------------
     kept = nodes[:WEB_NODE_CAP]
     kept_ids = {n["id"] for n in kept}
+    # the anchor stays visible past the cap (update nodes are not kept: a signed fetch hint
+    # runs to ~5K characters, and the targeted step's `why` already names the node)
+    if anchor and anchor["id"] not in kept_ids:
+        kept.append(anchor)
+        kept_ids.add(anchor["id"])
     block = {
         "web": {"as_of": web.get("as_of"), "window_days": web.get("window_days"), "nodes": kept,
                 "edges": [e for e in web.get("edges") or [] if e.get("from") in kept_ids and e.get("to") in kept_ids],
