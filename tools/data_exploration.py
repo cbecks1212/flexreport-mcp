@@ -55,9 +55,10 @@ async def company_financials(
     """A company's EDGAR financial statements, read directly — the targeted tool for "what did X report", revenue / EPS / margins / cash flow by quarter or year, and the tables a financials_release refreshes.
 
     ===> Prefer this over explore_data_catalogue for one company's reported statements:
-    it is synchronous, takes seconds, and returns the rows directly. `situate` plans it
-    when an event refreshed one of these tables (the ontology's relation cards list it in
-    `read_by`), with the arguments to pass through unchanged.
+    it is synchronous, takes seconds, and returns the rows directly. In a `situate`
+    result the relation cards of these six tables list it in `read_by`: when one of them
+    refreshed for the event (a same_chain_run edge to it in the web), call this with
+    financial_type=<that table>.
 
     TABLES (`financial_type`, each value is the table name):
       edgar_quarterly_financials (default)  standardized quarterly statements
@@ -148,10 +149,11 @@ async def explore_data_catalogue(
     seconds. Offer when the exploring is done, not mid-iteration, and never save by
     reflex.
 
-    ===> For anything EVENT-DRIVEN (a print, a filing, a 13F move, news, "what
-    happened"), call `situate(...)` first and take this tool's `query` from its plan —
-    the plan names the relations that HAVE refreshed since the event and omits the
-    ones that have not. Otherwise:
+    ===> For anything EVENT-DRIVEN about a company (a print, a filing, a 13F move,
+    news, "what happened"), call `situate(symbols=[...])` first: its table cards say
+    which relations HAVE refreshed since the event and which tool reads each
+    (`read_by`) — use that tool when it is not this one, and name only refreshed
+    relations in this tool's `query`. Otherwise:
 
     ===> THE DEFAULT, FIRST-STEP tool whenever the user wants to EXPLORE the data or
     understand a topic from the data (e.g. "use Flexreport to explore...", "how are
@@ -406,10 +408,9 @@ async def get_signed_sql_drilldown(
     An uncapped drilldown that fans out to constituents can return tens of thousands
     of rows and stall the client for minutes — pass `max_rows`.
 
-    Requires auth (your MCP client attaches the OAuth bearer automatically) — unlike
-    `get_company_event_web`, which is public: the web hands out the LINK to anyone, but
-    following it to the underlying rows is for signed-in users. A signed-out caller gets
-    a not-authenticated error, not rows; the fix is signing in, never a different token.
+    Requires auth (your MCP client attaches the OAuth bearer automatically). A
+    not-authenticated error means the sign-in lapsed; the fix is signing in, never a
+    different token.
     """
     extra, err = _replay_args(values, max_rows)
     if err:

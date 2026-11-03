@@ -357,7 +357,7 @@ async def list_available_reports(
          the strongest candidate.
       b) ANALYZE the content — read the event payloads (what the 8-K discloses, what the
          call said, what the deck guides to) and keep the ones that change something;
-         `situate(question=...)` and get_event_ontology say what each type means.
+         get_event_ontology(event_type=...) says what each type means.
       c) CONFIRM with intraday price action — detect_intraday_outlier_jumps(tickers=[...])
          (and get_aftermarket_data after the close) shows whether the market treated it
          as significant; a print with no reaction ranks below a mover with a filing.
