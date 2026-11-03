@@ -300,8 +300,8 @@ async def list_available_reports(
     event_types: Annotated[
         Optional[list[str]],
         Field(description="Plan-earning event types to list: eps_update, eps_release, 8k_release, "
-                          "financials_release, ir_publication, transcript_update, company_update. Any other "
-                          "type is a 422. Omit for every type."),
+                          "financials_release, ir_publication, transcript_update, biggest_mover, biggest_gainer, "
+                          "biggest_loser, company_update. Any other type is a 422. Omit for every type."),
     ] = None,
     report_date: Annotated[
         Optional[str],
