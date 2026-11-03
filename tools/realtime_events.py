@@ -17,7 +17,7 @@ from schemas.realtime_events import (
 )
 
 
-# The backend's recommended lean sections and card keys (MCP_HANDOVER_situate_company.md).
+# Company scope: the backend's recommended lean sections and card keys (MCP_HANDOVER_situate_company.md).
 # MAR on 2026-11-02: 110K characters with these defaults, 53K adding event_type +
 # card_types, 220K for every section and key. `read_by` points the agent at the
 # targeted tool for a refreshed table, so it stays in the defaults.
@@ -27,69 +27,91 @@ SituateSection = Literal["web", "cards", "relations", "entailed", "informs_relat
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Situate: What Is Going On With A Company", readOnlyHint=True),
-    # A situation is 30-40K characters per symbol; structured output would send it twice.
+    annotations=ToolAnnotations(title="Situate: What Is Going On Right Now", readOnlyHint=True),
+    # A company situation is 30-110K characters per symbol; structured output would send it twice.
     structured_output=False,
 )
 async def situate(
     ctx: Context,
     symbols: Annotated[
-        list[str],
-        Field(description="Tickers to situate, e.g. [\"MAR\"] (1-5; one backend call each, in parallel).",
-              min_length=1, max_length=5),
-    ],
+        Optional[list[str]],
+        Field(description="Tickers to situate, e.g. [\"MAR\"] (max 5; one backend call each, in parallel). "
+                          "Omit for the whole market.", max_length=5),
+    ] = None,
     event_type: Annotated[
         Optional[str],
-        Field(description="The realtime event type the question is about, e.g. \"financials_release\" for a "
-                          "10-Q/10-K, \"ir_publication\" for a deck, \"8k_release\". Its card is returned even when "
-                          "it has no node in the window. Valid values: list_options(\"event_types\")."),
+        Field(description="WITH symbols: the realtime event type the question is about, e.g. \"financials_release\" "
+                          "for a 10-Q/10-K, \"ir_publication\" for a deck, \"8k_release\". Its card is returned even "
+                          "when it has no node in the window. Valid values: list_options(\"event_types\")."),
     ] = None,
     card_types: Annotated[
         Optional[list[str]],
-        Field(description="Return cards only for these event types instead of every type present; entailed and "
-                          "relations shrink with them. E.g. [\"financials_release\"] with event_type for a filing.",
+        Field(description="WITH symbols: return cards only for these event types instead of every type present; "
+                          "entailed and relations shrink with them. E.g. [\"financials_release\"] with event_type.",
               max_length=20),
     ] = None,
     window_days: Annotated[
         Optional[int],
-        Field(description="Event-web look-back in days (default 14, max 90).", ge=1, le=90),
+        Field(description="WITH symbols: event-web look-back in days (default 14, max 90).", ge=1, le=90),
     ] = None,
     sections: Annotated[
         Optional[list[SituateSection]],
-        Field(description="Sections to return (default web, cards, relations, entailed). Add episodes for the "
-                          "episode definitions; informs_relations is the largest and least targeted."),
-    ] = None,
-    include_keys: Annotated[
-        Optional[list[str]],
-        Field(description="Fields kept inside each event and relation card (default persisted_in, sources, "
-                          "entails, preceded_by, layer, read_by, refreshed_by). Pass [] for whole cards. Keep "
-                          "read_by: it names the tool that reads each table.", max_length=30),
+        Field(description="WITH symbols: sections to return (default web, cards, relations, entailed). Add episodes "
+                          "for the episode definitions; informs_relations is the largest and least targeted."),
     ] = None,
     include_fetch: Annotated[
         bool,
-        Field(description="Keep each web node's `fetch` hint (the follow-up call and, on data updates, a "
-                          "signed_query_url for get_signed_sql_drilldown). false shrinks the web 2-4x."),
+        Field(description="WITH symbols: keep each web node's `fetch` hint (the follow-up call and, on data updates, "
+                          "a signed_query_url for get_signed_sql_drilldown). false shrinks the web 2-4x."),
     ] = True,
+    event_types: Annotated[
+        Optional[list[str]],
+        Field(description="NO symbols: the realtime event types the question is about, in the order named, e.g. "
+                          "[\"ir_publication\"] for decks, [\"13f_exited\"] for hedge-fund exits. Step 1 of the "
+                          "order is the first. Valid values: list_options(\"event_types\").", max_length=10),
+    ] = None,
+    family: Annotated[
+        Optional[str],
+        Field(description="NO symbols, no type named: one family whose episode is walked in order — earnings, news, "
+                          "market_movement, institutional_ownership, analyst_activity, strategy, prediction, insider."),
+    ] = None,
+    question: Annotated[
+        Optional[str],
+        Field(description="NO symbols: the user's words verbatim, keyword-routed to event types / a family only when "
+                          "neither event_types nor family is passed. Naming nothing is a market-wide sweep. "
+                          "Ignored with symbols.", max_length=500),
+    ] = None,
+    top_tickers: Annotated[
+        Optional[int],
+        Field(description="NO symbols: members listed per event type from the realtime cache, newest first "
+                          "(default 10, max 50).", ge=0, le=50),
+    ] = None,
+    report_inventory: Annotated[
+        bool,
+        Field(description="NO symbols: include fresh/stale report-plan counts per plan-earning type."),
+    ] = True,
+    include_keys: Annotated[
+        Optional[list[str]],
+        Field(description="Fields kept inside each card. With symbols the default is persisted_in, sources, "
+                          "entails, preceded_by, layer, read_by, refreshed_by ([] = whole cards; keep read_by: it "
+                          "names the tool that reads each table). With no symbols the default is the trimmed "
+                          "market card.", max_length=30),
+    ] = None,
 ) -> dict[str, Any]:
-    """THE FIRST CALL on a company. What is going on with one or more named companies — what happened, what it means, which tables are fresh, and which tool reads each — from one backend call per symbol.
+    """THE FIRST CALL. What is going on right now — for named companies, or for the whole market — from the backend's situation endpoints. Call it before any other flexreport tool on anything about a company, an event, or "now".
 
-    ===> Call this FIRST for "catch me up on X", "what happened at X / why", "how did
-    X's quarter look", "anything before X's earnings?", and BEFORE aiming
-    explore_data_catalogue, list_realtime_events or a report tool at a company.
-    When the question is about one event, pass it as `event_type` AND `card_types`
-    (halves the payload: the cards of every other present type are dropped):
+    TWO SCOPES (each parameter's description says which it belongs to):
+
+    WITH symbols -> GET /situate-company, one call per symbol. For "catch me up on
+    X", "what happened at X / why", "how did X's quarter look", and BEFORE aiming
+    explore_data_catalogue, list_realtime_events or a report tool at a company. When
+    the question is about one event, pass it as `event_type` AND `card_types` (halves
+    the payload: the cards of every other present type are dropped):
       situate(symbols=["OKTA"])                                           catch-up
       situate(symbols=["MAR"], event_type="financials_release",
               card_types=["financials_release"])                         the 10-Q
-      situate(symbols=["CLX"], event_type="ir_publication",
-              card_types=["ir_publication"])                              the deck
-    Market-wide questions with no company ("any earnings today?", "biggest movers")
-    are not this tool: list_options("event_types") -> list_realtime_events.
-
-    Returns {"situations": {SYMBOL: situation}}, one per symbol (a symbol that failed
-    carries {"error"} instead). A situation is the backend's /situate-company slice:
-      as_of / ontology_as_of / realtime_cache_ttl_hours (12: older events are out of
-                      the realtime cache; read the card's persisted_in table instead)
+    Returns {"situations": {SYMBOL: situation}} (a symbol that failed carries
+    {"error"} instead):
       present_types   event types with a node in the window
       web             {nodes, edges}: the newest node per event type and per table
                       over window_days. Edges carry `cause`: same_chain_run (observed:
@@ -105,32 +127,63 @@ async def situate(
                       read_by — THE TOOL THAT READS IT. Prefer the first tool there
                       over explore_data_catalogue (company_financials for the EDGAR
                       statements, get_company_snapshot, predict_earnings_move, ...).
-      entailed        [{relation, layer, provenance, via}]: tables the events entail,
-                      already routed to this company's EDGAR or FMP side
-      edgar_filer / routed_out / source_routing
-                      which side of the EDGAR/FMP split serves the company; never query
-                      a routed_out table for it
+      entailed        tables the events entail, routed to this company's EDGAR or FMP
+                      side; edgar_filer / routed_out / source_routing say which side
+                      (never query a routed_out table for it)
+    Then: a node still inside the 12h cache -> list_realtime_events(event_type,
+    tickers=[symbol]); older -> its card's persisted_in table. For a table that
+    refreshed for the event, call its read_by tool first, e.g.
+    company_financials(symbol, financial_type=<the table>, limit=5, line_items=[...]).
+    A table whose next_run_at is after the event still shows the prior period. An
+    empty web is not a quiet week: widen window_days.
 
-    HOW TO USE IT:
-      1. Read web + cards for what happened; a node whose type is still inside the
-         12h cache -> list_realtime_events(event_type, tickers=[symbol]); older ->
-         its card's persisted_in table.
-      2. For each table that refreshed for the event (same_chain_run edge, or written
-         after it), call the tool its relation card's read_by names first — e.g.
-         company_financials(symbol, financial_type=<the table>, limit=5,
-         line_items=[...]). explore_data_catalogue only for what no read_by tool covers.
-      3. A table whose refreshed_by next_run_at is after the event does NOT reflect
-         it yet: it shows the prior period. A follower missing from the web is "not
-         recorded yet", not "did not happen". An empty web is not a quiet week:
-         widen window_days.
-    get_company_event_web gives the raw graph (up to 200 nodes, no dedup);
+    NO symbols -> GET /situate-market. For "any earnings today?", "most significant
+    investor decks today", "which hedge funds exited?", "what's going on?". Name the
+    types yourself when you can (`event_types`, else `family`); otherwise pass the
+    user's words as `question`:
+      situate(event_types=["ir_publication"])        decks today: step 1 = decks
+      situate(family="earnings")                     the earnings episode in order
+      situate(question="what's going on?")           a sweep: one entry per episode
+    Returns {shape, routed_from, order, types, event_types, market, ...}:
+      shape           named_types | family | sweep (nothing named: no default family)
+      routed_from     what decided the order: `by` = explicit | question | none
+      order           up to 4 event types, in reading order
+      types[T]        card (trimmed ontology card: persisted_in, followers, ...),
+                      cache {count, newest_at, oldest_at, tickers — or members with
+                      member_kind cik | strategy | singleton}, reports {fresh, stale,
+                      report_date}
+      event_types     the whole realtime corpus (type, family, description)
+      market          exchange, is_open, session
+      degraded_sources  realtime_cache / report_inventory when one was unreachable:
+                      counts are then unknown, NOT zero
+    Then: list_realtime_events(event_type=T, tickers=[...]) in `order`, skipping a
+    type whose cache.count is 0 (the 12h cache is cold for it — say so; it is not
+    evidence nothing happened). Narrow every follow-up with tickers=[...] to the names
+    just seen. For the research on the names that stand out, take the types that carry
+    `reports` into list_available_reports(event_types=[...],
+    report_date=<types[T].reports.report_date>), then get_latest_report. A family with no realtime types returns `message` naming
+    its durable tables.
+
+    Skip this tool ONLY for pure enumeration (list_options), an explicit "get me the
+    existing report" (get_latest_report), or a metric-history question with no event
+    in it ("Micron EPS over 8 quarters" -> company_financials(symbol="MU", limit=8,
+    line_items=["epsDiluted"]); cross-company or non-statement history ->
+    explore_data_catalogue). get_company_event_web gives a company's raw graph;
     get_event_ontology gives any full card.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
-    syms = list(dict.fromkeys(s.strip().upper() for s in symbols if s and s.strip()))[:5]
+    syms = list(dict.fromkeys(s.strip().upper() for s in symbols or [] if s and s.strip()))[:5]
     if not syms:
-        raise ToolError("Pass at least one ticker in `symbols`, e.g. [\"MAR\"].")
+        if event_type or card_types:
+            raise ToolError("`event_type` / `card_types` apply WITH symbols. For the market, pass "
+                            "event_types=[...] (or family, or question).")
+        return _ok(await _send(ctx, "GET", "/situate-market", params=_market_params(
+            event_types, family, question, top_tickers, report_inventory, include_keys)))
+    if event_types or family:
+        raise ToolError("`event_types` / `family` apply with NO symbols. For a company, pass "
+                        "event_type=\"...\" and card_types=[...].")
+
     params: dict[str, Any] = {
         "sections": list(sections) if sections else list(SITUATE_DEFAULT_SECTIONS),
         "include_fetch": "true" if include_fetch else "false",
@@ -151,6 +204,24 @@ async def situate(
     if len(errors) == len(results):
         _ok(errors[0])  # every symbol failed: raise the backend error instead of returning only errors
     return {"situations": dict(zip(syms, results))}
+
+
+def _market_params(event_types: Optional[list[str]], family: Optional[str], question: Optional[str],
+                   top_tickers: Optional[int], report_inventory: bool,
+                   include_keys: Optional[list[str]]) -> dict[str, Any]:
+    """Query string for /situate-market: only what the caller set, so the backend defaults apply."""
+    params: dict[str, Any] = {"report_inventory": "true" if report_inventory else "false"}
+    if event_types:
+        params["event_types"] = [t.strip() for t in event_types if t and t.strip()]
+    if family and family.strip():
+        params["family"] = family.strip()
+    if question and question.strip():
+        params["question"] = question.strip()
+    if top_tickers is not None:
+        params["top_tickers"] = top_tickers
+    if include_keys:
+        params["include_keys"] = list(include_keys)
+    return params
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List Real-Time Market Events", readOnlyHint=True))
@@ -174,11 +245,12 @@ async def list_realtime_events(
 ) -> RealtimeEventsResult:
     """Pull live market events from the backend's Redis-backed cache (12h TTL).
 
-    ===> For a named company, call `situate(symbols=[...])` FIRST: its web says which
-    event types fired and when. A node older than the 12h cache returns [] here —
-    its payload lives in the card's `persisted_in` table instead. For the market
-    (no company), `list_options("event_types")` enumerates the valid type strings
-    and descriptions; pick the type the question names. `event_type` is REQUIRED and
+    ===> Call `situate(...)` FIRST. With symbols, its web says which event types fired
+    for the company and when — a node older than the 12h cache returns [] here; its
+    payload lives in the card's `persisted_in` table instead. With no symbols, its
+    `order` says which types to read and its `cache.count` per type says which are
+    empty before you call (0 = cold cache, not "nothing happened").
+    `list_options("event_types")` enumerates the valid type strings. `event_type` is REQUIRED and
     has no default on purpose: the type is the whole question, and a default
     would answer a different one (eps_update is one slice of the earnings
     family, not the family).
@@ -435,7 +507,7 @@ async def get_event_ontology(
     ===> For a named company, `situate(symbols=[...])` returns the cards of the event
     types in its web and the table cards they entail — start there. Call this tool
     directly for the FULL card of an event type, a relation card, a whole family, or
-    the unfiltered graph, and for market-wide questions with no company.
+    the unfiltered graph.
 
     ===> REQUISITE for: any real-time / live-events request, any "what
     happened / why / catch me up" question, and BEFORE aiming explore_data_catalogue or
