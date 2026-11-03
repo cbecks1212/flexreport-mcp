@@ -113,7 +113,17 @@ async def company_financials(
                 row["mapping"] = json.loads(row["mapping"])
             except ValueError:
                 pass
-    return CompanyFinancialsResult(symbol=body["symbol"], financial_type=financial_type, count=len(rows), rows=rows)
+    note = None
+    if not rows:
+        # Seen 2026-11-02: RYAAY (a foreign filer) came back as a bare count 0. The endpoint
+        # cannot say which reason applies, so name both and where to check.
+        note = (f"No rows for {body['symbol']} in {financial_type}"
+                + (" with those line_items" if items else "") + ". Either it is not a US SEC filer — "
+                "situate(symbols=[...]) says so in `edgar_filer` / `source_routing`, and its statements are in the "
+                "FMP tables (quarterly_financials, annual_financials) via explore_data_catalogue — or this table has no "
+                "filing for it yet" + (", or the line_items names do not match this table's" if items else "") + ".")
+    return CompanyFinancialsResult(symbol=body["symbol"], financial_type=financial_type, count=len(rows), rows=rows,
+                                   note=note)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Explore Data Catalogue", readOnlyHint=False, destructiveHint=False))

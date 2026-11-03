@@ -38,8 +38,10 @@ class CachedReport(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     symbol: str
-    url: Optional[str] = Field(None, description="Presigned PDF download link, valid ~6h.")
-    report: Optional[str] = Field(None, description="The same PDF inline as base64.")
+    url: Optional[str] = Field(
+        None, description="Presigned link to the PDF, valid ~6h from the call. Download it to read the report; hand "
+                          "it to the user to open. Call get_latest_report again for a fresh link; never edit one."
+    )
     generated_at: Optional[str] = Field(None, description="When the cached PDF was built (ISO UTC).")
     age_hours: Optional[float] = Field(None, description="Hours since generated_at.")
     latest_event_at: Optional[str] = Field(None, description="Timestamp of the symbol's latest report inputs (the event).")
