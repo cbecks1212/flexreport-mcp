@@ -8,7 +8,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from core import mcp, _send, _ok, _too_large
+from core import mcp, _send, _ok, _too_large, compact_output
 from schemas.utility import (
     BillingLinkResult,
     ListOptionsResult,
@@ -84,6 +84,7 @@ MAX_TASK_RESULT_BYTES = int(os.environ.get("MCP_MAX_TASK_RESULT_BYTES", str(8_00
     # send them twice (text + structuredContent). The model is still the documented shape.
     structured_output=False,
 )
+@compact_output
 async def get_task_status(
     ctx: Context,
     task_id: Annotated[str, Field(description="The task_id an async tool returned.")],

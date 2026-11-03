@@ -8,7 +8,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from core import mcp, _send, _ok
+from core import mcp, _send, _ok, compact_output
 from schemas.realtime_events import (
     CompanyEventWebResult,
     CompanySnapshotResult,
@@ -31,6 +31,7 @@ SituateSection = Literal["web", "cards", "relations", "entailed", "informs_relat
     # A company situation is 30-110K characters per symbol; structured output would send it twice.
     structured_output=False,
 )
+@compact_output
 async def situate(
     ctx: Context,
     symbols: Annotated[

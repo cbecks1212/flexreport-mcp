@@ -84,6 +84,7 @@ class CompanyFinancialsResult(BaseModel):
                     "accepted_date, symbol, statement, line_item, value, mapping (accession, XBRL inputs, formula), "
                     "last_updated. As-filed rows carry concept, accession and filing_url."
     )
+    note: Optional[str] = Field(None, description="Set only when no rows came back: what an empty result can mean.")
 
 
 class TraceSourcesResult(BaseModel):

@@ -8,14 +8,17 @@ model wraps its backend call in `_ok(...)` so errors raise instead of failing
 output-schema validation.
 """
 
+import functools
 import json
 import os
 from pathlib import Path
 from typing import Any
 
 import httpx
+import pydantic_core
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ContentBlock, TextContent
 
 from client import MissingAuthError, auth_headers, get_client
 
@@ -174,3 +177,22 @@ def _ok(resp: Any) -> Any:
             msg += f": {detail[:2000]}"
         raise ToolError(msg)
     return resp
+
+
+def compact_output(fn):
+    """Serialize an UNSTRUCTURED tool's result as compact JSON.
+
+    For a tool registered with structured_output=False, FastMCP turns a returned dict or
+    model into text with indent=2, which on these large payloads is ~40% whitespace: a
+    one-symbol situate was 35.9K characters of JSON delivered as 63K, and a five-symbol one
+    (292K) went over Claude Code's tool-result limit (2026-11-02 prod test). Same
+    serializer, no indent. Put it UNDER @mcp.tool(...); functools.wraps keeps the
+    signature and docstring FastMCP reads. A str or content block passes through as is.
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        result = await fn(*args, **kwargs)
+        if result is None or isinstance(result, (str, ContentBlock)):
+            return result
+        return TextContent(type="text", text=pydantic_core.to_json(result, fallback=str).decode())
+    return wrapper

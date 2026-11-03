@@ -15,7 +15,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from core import mcp, _send, _ok, _request_capped, MAX_RESPONSE_BYTES
+from core import mcp, _send, _ok, _request_capped, MAX_RESPONSE_BYTES, compact_output
 from schemas.data_feeds import (
     DatasetFormat,
     DeleteUserDataFeedResult,
@@ -56,6 +56,7 @@ def _collapse_documents(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # of text per row, and structured output would send it twice (text + structuredContent).
     structured_output=False,
 )
+@compact_output
 async def download_dataset(
     ctx: Context,
     dataset: Annotated[
@@ -564,6 +565,7 @@ def _parse_dataset_file(fmt: str, body: bytes) -> tuple[list[dict[str, Any]], Op
     # structured_output=False: a whole file of rows would be sent twice (text + structuredContent).
     structured_output=False,
 )
+@compact_output
 async def get_user_dataset_file(
     ctx: Context,
     dataset_name: Annotated[str, Field(description="The dataset's `name`, as list_user_datasets shows it.")],

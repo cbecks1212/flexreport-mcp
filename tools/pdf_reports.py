@@ -8,7 +8,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from core import mcp, _send, _ok
+from core import mcp, _send, _ok, compact_output
 from schemas.pdf_reports import (
     CachedReportsResult,
     DeleteTemplateResult,
@@ -225,6 +225,7 @@ async def generate_research_report(
     # send them twice (text + structuredContent). The model is still the documented shape.
     structured_output=False,
 )
+@compact_output
 async def get_latest_report(
     ctx: Context,
     symbols: Annotated[
@@ -394,6 +395,7 @@ async def list_available_reports(
     # send them twice (text + structuredContent). The model is still the documented shape.
     structured_output=False,
 )
+@compact_output
 async def download_pdf_from_url(
     ctx: Context,
     url: Annotated[
