@@ -2,96 +2,14 @@
 
 Each model is a tool's return type, so FastMCP advertises it as the tool's
 `outputSchema` and validates every result against it. Models use extra="allow"
-so a new backend key passes through instead of failing validation. Event records,
-ontology cards and situate's per-symbol blocks are polymorphic, so only their
-stable keys are typed; the rest are open dicts.
+so a new backend key passes through instead of failing validation. Event records
+and ontology cards are polymorphic, so only their stable keys are typed; the rest
+are open dicts. `situate` returns unstructured (its payload would be sent twice).
 """
 
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-
-
-# ── situate ────────────────────────────────────────────────────────────────
-class SituateMarket(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    exchange: Optional[str] = None
-    is_open: Optional[bool] = Field(None, description="Null when market status was unavailable.")
-    session: Optional[str] = Field(None, description="regular | closed | unknown.")
-    timezone: Optional[str] = None
-
-
-class SituatePlanStep(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    step: int = Field(description="1-based execution order.")
-    tool: str = Field(description="Exact tool name to call.")
-    args: dict[str, Any] = Field(description="Valid arguments for `tool` — pass them through unchanged.")
-    why: str
-    auth: Optional[str] = Field(None, description="required | public.")
-    sync: Optional[bool] = Field(None, description="False means the call returns a task_id to poll with get_task_status.")
-    optional: Optional[bool] = None
-    provenance: Optional[str] = None
-
-
-class SituateSkip(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    tool: str = Field(description="A call NOT to make.")
-    why: str
-    args: Optional[dict[str, Any]] = None
-
-
-class SituateSuggestion(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    tool: str
-    args: dict[str, Any] = Field(default_factory=dict)
-    when: str = Field(description="Make this call ONLY if this condition arises after the plan has run.")
-    why: str
-
-
-class SituateSymbolBlock(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    web: dict[str, Any] = Field(description="Newest event-web nodes and the edges among them (full graph via get_company_event_web).")
-    newest_event: Optional[dict[str, Any]] = None
-    episode: Optional[dict[str, Any]] = Field(None, description="Dominant episode: anchor and members (arrived | pending | overdue).")
-    cache: Optional[dict[str, Any]] = Field(None, description="Event types still in (present) or aged out of (expired) the realtime cache.")
-    freshness: Optional[list[dict[str, Any]]] = Field(None, description="Per relation: last_refresh_at, next_run_at, reflects_newest_event.")
-    cards: Optional[dict[str, Any]] = Field(None, description="Trimmed ontology cards, keyed by event type.")
-    deepen: Optional[list[str]] = Field(None, description="Tools the ontology says deepen this event.")
-    error: Optional[str] = Field(None, description="Set when the event web errored for this symbol.")
-
-
-class SituateUniverseBlock(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    shape: Optional[str] = Field(None, description="named_types | family | sweep.")
-    family: Optional[str] = None
-    episode: Optional[str] = None
-    asked_types: Optional[list[str]] = Field(None, description="Realtime event types the question named.")
-    order: Optional[list[str]] = Field(None, description="Event types in the order the plan walks them.")
-    cards: Optional[dict[str, Any]] = None
-    event_types: Optional[list[dict[str, Any]]] = Field(None, description="The whole realtime corpus: event_type, family, description.")
-
-
-class SituateResult(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    as_of: str
-    scope: str = Field(description="symbol (symbols were named) or universe (the market).")
-    realtime_cache_ttl_hours: int
-    ontology_as_of: Optional[str] = None
-    degraded: bool = Field(description="True when a source was unavailable; guidance[] says which.")
-    market: SituateMarket
-    symbols: Optional[dict[str, SituateSymbolBlock]] = Field(None, description="Per-symbol blocks (symbol scope only).")
-    universe: Optional[SituateUniverseBlock] = Field(None, description="Market-wide block (universe scope only).")
-    plan: list[SituatePlanStep] = Field(description="ORDERED tool calls to execute as-is.")
-    skip: list[SituateSkip] = Field(description="Calls that would return nothing or waste a job — do not make them.")
-    suggest: list[SituateSuggestion] = Field(description="Calls to make only if their `when` arises.")
-    guidance: list[str] = Field(description="Situation-scoped rules to read before writing.")
 
 
 # ── list_realtime_events ───────────────────────────────────────────────────

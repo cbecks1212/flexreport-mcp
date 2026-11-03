@@ -69,7 +69,7 @@ By default, a live-streaming ask gets a **dashboard** (in Claude, an Artifact) r
 
 **1b. Events from the past twelve hours.** Analyze real-time SEC 8-K filings, while also pulling in investor relations decks and 5-minute bars to quickly identify stocks making meaningful moves: *"What are the latest 8-K releases? Highlight the most significant ones, pull the accompanying investor relations releases via Flexreport Finance, chart 5-minute bars for any names making meaningful moves, and tell me how they align with each company's current state. I would like this in tabular format: 8-K summary, company trend, Flexreport Finance 8-K analysis S3 link, IR deck link."*
 
-Tools: `situate` → `list_realtime_events`, then `get_aftermarket_data` / `detect_intraday_outlier_jumps` and `get_latest_report`.
+Tools: `list_realtime_events` (types from `list_options("event_types")`), then `get_aftermarket_data` / `detect_intraday_outlier_jumps` and `get_latest_report`.
 
 ### 2. Reports
 
@@ -99,13 +99,13 @@ Tools: `explore_data_catalogue` (transcripts, fundamentals, estimates), `trace_d
 
 ## Tools
 
-50 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
+57 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
 
 ### Situate & real-time events (`tools/realtime_events.py`)
 
 | Tool | Backend endpoint | What it does |
 |---|---|---|
-| `situate(symbols, window_days, question)` | `GET /get-company-event-web` + `GET /get-event-ontology` + `GET /is-market-open` | **The first call.** Composes the event web (what happened to *this* company), the ontology (what that *kind* of event entails, what follows it, where its payload lives after the 12h cache, when each table next refreshes) and market status into what is going on right now plus an ordered **`plan`** of exact tool calls, a **`skip`** list of calls that would return nothing, and situation-scoped **`guidance`**. The plan starts at the realtime event type the question names (`EVENT_VOCABULARY` in `situate.py` covers every type in `list_options("event_types")`); a question naming only a family walks its episode, one naming nothing sweeps every episode — there is no default family, and `explore_data_catalogue` is never planned for a market-wide "today" question. Composition is in `situate.py` (pure functions; `python tests/test_situate_routing.py`); no new backend route. Public, synchronous |
+| `situate(symbols, event_type, card_types, window_days, sections, include_keys, include_fetch)` | `GET /situate-company` (one call per symbol, in parallel) | **The first call on a company.** A pass-through to the backend's per-company situation: the event web deduped to the newest node per event type and per table (`same_chain_run` edges link each table to the event that wrote it), the event cards, the table cards with `read_by` (the tool that reads each table — `company_financials` for the EDGAR statements) and refreshed_by, and `entailed` routed to the company's EDGAR or FMP side. Defaults to the backend's lean call (sections web/cards/relations/entailed; card keys persisted_in, sources, entails, preceded_by, layer, read_by, refreshed_by: MAR on 2026-11-02: 110K characters, 53K with `event_type` + `card_types`, 220K with every section and key). `event_type` + `card_types` narrow it to the event the question is about. Market-wide questions (no company) go to `list_options("event_types")` → `list_realtime_events`. Unstructured output (the payload would be sent twice). Synchronous, auth |
 | `list_realtime_events(event_type, tickers, sector, industry, market_cap)` | `POST /get-realtime-events` | Pull live events (EPS updates, transcripts, ratings, …) from the 12h cache; each event's `report_inputs` (the ~27 KB report config) is dropped, `report_inputs_key` kept |
 | `get_company_snapshot(symbol)` | `GET /get-company-snapshot` | Structured snapshot: thesis, fundamentals, technicals, price targets, ownership, grades |
 | `get_company_event_web(symbol, window_days, max_nodes)` | `GET /get-company-event-web` | The **why** behind the snapshot — the company's recent event **graph**: time-ordered event/`data_update` nodes with `fetch` hints and typed edges (`same_chain_run` / `lineage` / `co_occurrence`). Pair it with `get_company_snapshot`, and call it **before** chaining a targeted `list_realtime_events` / `explore_data_catalogue` / report request at one symbol |
@@ -141,6 +141,7 @@ Default delivery for a live-streaming ask is a dashboard (in Claude, an Artifact
 
 | Tool | Backend endpoint | What it does |
 |---|---|---|
+| `company_financials(symbol, financial_type, limit, line_items)` | `POST /company-financials` | **One company's EDGAR statements, read directly** — standardized quarterly/annual (`edgar_quarterly_financials` default), as filed (`edgar_10q_financials` / `edgar_10k_financials`, XBRL concepts with accession + filing_url), 8-K tables (`edgar_eight_k`) or YoY change (`edgar_financials_yoy_change_m`, stale until the post-transcript / 19:00 ET refresh). `limit` 1-12, default 5 (includes the year-ago quarter); always pass `line_items` — unfiltered as-filed pulls cost 28K-108K tokens and provenance comes from `trace_data_sources(relation=<financial_type>, keys=[{symbol, date, statement, line_item}])`. `situate`'s table cards name it in `read_by`. Synchronous, auth |
 | `explore_data_catalogue(query)` | `POST /data-catalogue-exploration` | **Default route** — fast, interactive EDA against the data platform → result sets to render as charts/tables (dashboard only, 20/hour) → `{task_id, status}` |
 | `explore_data_coverage(query)` | `POST /data-coverage-exploration` | **Coverage counts and breakdowns** — how many symbols carry a dataset (IR decks, transcripts, 13F, insider, estimates…), by sector / industry / country / market cap / year, and how far history goes. Public: no account needed, so prospects can ask what the platform covers |
 | `get_signed_sql_drilldown(encrypted_query_token, prompt, values, max_rows)` | `GET /query-data` | Follow a `get_company_event_web` node's `signed_query_url` (or its bare `t` token) to the rows behind it — new record flagged `is_new_record: true`, plus context rows; tokens are server-minted only, never constructed. Optional `values` (typed slot fill, no LLM) and `prompt` (natural language, fills what `values` left out) re-aim a token that is a placeholder twin at other entities; `max_rows` caps the payload, and a sliced reply carries `row_count` + `truncated: true` (authed) |
@@ -229,7 +230,6 @@ server.py            entrypoint: imports the tools package, adds /health, runs t
 core.py              the FastMCP instance, server instructions and `_send` (backend forwarding)
 client.py            shared httpx client + inbound-bearer forwarding
 auth_verifier.py     OAuth resource-server token validation (RS256 via the backend JWKS)
-situate.py           pure composition logic behind the `situate` tool
 instructions.json    server instructions (non-code copy)
 tools/
   realtime_events.py     situate, list_realtime_events, company snapshot / event web, event ontology

@@ -1,188 +1,156 @@
 """Real-time event tools: situate, the 12h event cache, company snapshot/event web, event ontology."""
 
 import asyncio
-import time
-from datetime import datetime, timezone
 from typing import Annotated, Any, Literal, Optional
 
 from mcp.server.fastmcp import Context
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-import situate as situate_mod
 from core import mcp, _send, _ok
 from schemas.realtime_events import (
     CompanyEventWebResult,
     CompanySnapshotResult,
     EventOntologyResult,
     RealtimeEventsResult,
-    SituateResult,
 )
 
 
-_ONTOLOGY_CACHE: dict[str, tuple[float, Any]] = {}
-_ONTOLOGY_CACHE_TTL_S = 600.0
+# The backend's recommended lean sections and card keys (MCP_HANDOVER_situate_company.md).
+# MAR on 2026-11-02: 110K characters with these defaults, 53K adding event_type +
+# card_types, 220K for every section and key. `read_by` points the agent at the
+# targeted tool for a refreshed table, so it stays in the defaults.
+SITUATE_DEFAULT_SECTIONS = ("web", "cards", "relations", "entailed")
+SITUATE_DEFAULT_KEYS = ("persisted_in", "sources", "entails", "preceded_by", "layer", "read_by", "refreshed_by")
+SituateSection = Literal["web", "cards", "relations", "entailed", "informs_relations", "episodes"]
 
 
-async def _ontology_graph(ctx: Context) -> Any:
-    """The unfiltered event ontology (~230 KB, symbol-independent), cached in-process for
-    10 minutes so `situate` costs one backend call per 10 minutes, not one per event type."""
-    hit = _ONTOLOGY_CACHE.get("all")
-    if hit and time.monotonic() - hit[0] < _ONTOLOGY_CACHE_TTL_S:
-        return hit[1]
-    res = await _send(ctx, "GET", "/get-event-ontology", params={"format": "cards"}, require_auth=False)
-    if isinstance(res, dict) and "error" not in res and not res.get("degraded"):
-        _ONTOLOGY_CACHE["all"] = (time.monotonic(), res)
-    return res
-
-
-async def _realtime_event_corpus(ctx: Context) -> list[dict[str, Any]]:
-    """The realtime-event corpus (`list_options("event_types")`: every type, its family and
-    a one-line description), cached in-process like the ontology. Echoed by `situate` in
-    universe scope so the agent sees every type it could ask for. [] when unavailable."""
-    hit = _ONTOLOGY_CACHE.get("event_types")
-    if hit and time.monotonic() - hit[0] < _ONTOLOGY_CACHE_TTL_S:
-        return hit[1]
-    res = await _send(ctx, "GET", "/list-realtime-event-options", require_auth=False)
-    rows = res if isinstance(res, list) else []
-    if rows:
-        _ONTOLOGY_CACHE["event_types"] = (time.monotonic(), rows)
-    return rows
-
-
-@mcp.tool(annotations=ToolAnnotations(title="Situate: What Is Going On Right Now", readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(title="Situate: What Is Going On With A Company", readOnlyHint=True),
+    # A situation is 30-40K characters per symbol; structured output would send it twice.
+    structured_output=False,
+)
 async def situate(
     ctx: Context,
     symbols: Annotated[
+        list[str],
+        Field(description="Tickers to situate, e.g. [\"MAR\"] (1-5; one backend call each, in parallel).",
+              min_length=1, max_length=5),
+    ],
+    event_type: Annotated[
+        Optional[str],
+        Field(description="The realtime event type the question is about, e.g. \"financials_release\" for a "
+                          "10-Q/10-K, \"ir_publication\" for a deck, \"8k_release\". Its card is returned even when "
+                          "it has no node in the window. Valid values: list_options(\"event_types\")."),
+    ] = None,
+    card_types: Annotated[
         Optional[list[str]],
-        Field(description="Tickers to situate (max 5; extras are dropped). Omit for the whole market."),
+        Field(description="Return cards only for these event types instead of every type present; entailed and "
+                          "relations shrink with them. E.g. [\"financials_release\"] with event_type for a filing.",
+              max_length=20),
     ] = None,
     window_days: Annotated[
         Optional[int],
-        Field(description="Event-web look-back in days (backend default 7, max 90).", ge=1, le=90),
+        Field(description="Event-web look-back in days (default 14, max 90).", ge=1, le=90),
     ] = None,
-    question: Annotated[
-        Optional[str],
-        Field(description="The user's question VERBATIM; keyword-matched to the realtime event types it names, "
-                          "which decides where the plan starts."),
+    sections: Annotated[
+        Optional[list[SituateSection]],
+        Field(description="Sections to return (default web, cards, relations, entailed). Add episodes for the "
+                          "episode definitions; informs_relations is the largest and least targeted."),
     ] = None,
-) -> SituateResult:
-    """THE FIRST CALL. What is going on right now — for the market, or for the named symbols — and a ready-made PLAN of the tool calls that answer the user's question. Call it before any other flexreport tool on anything about a company, an event, or "now".
+    include_keys: Annotated[
+        Optional[list[str]],
+        Field(description="Fields kept inside each event and relation card (default persisted_in, sources, "
+                          "entails, preceded_by, layer, read_by, refreshed_by). Pass [] for whole cards. Keep "
+                          "read_by: it names the tool that reads each table.", max_length=30),
+    ] = None,
+    include_fetch: Annotated[
+        bool,
+        Field(description="Keep each web node's `fetch` hint (the follow-up call and, on data updates, a "
+                          "signed_query_url for get_signed_sql_drilldown). false shrinks the web 2-4x."),
+    ] = True,
+) -> dict[str, Any]:
+    """THE FIRST CALL on a company. What is going on with one or more named companies — what happened, what it means, which tables are fresh, and which tool reads each — from one backend call per symbol.
 
-    ===> Call this FIRST for: "catch me up on X", "what happened / why", "anything
-    before earnings?", "any earnings / 8-Ks / 13F moves / movers today?", "how is X
-    trading", and BEFORE aiming explore_data_catalogue, list_realtime_events or a
-    report tool at a company. Pass the user's question verbatim in `question`: it is
-    matched by keyword (never an LLM) against EVERY realtime event type — decks/
-    presentations -> ir_publication, 8-Ks, transcripts, upgrades, gainers/losers, 13F
-    exits, baskets, predictions, ... — and the plan STARTS at the type the user named.
-    A question naming only a family ("any earnings today?") walks that family's episode;
-    one naming neither ("what's going on?") sweeps every episode. Synchronous, public.
-      situate(symbols=["OKTA"], question="catch me up on OKTA")   one or more names (max 5)
-      situate(question="any earnings events today?")             no symbols = the market
-      situate(question="most significant investor decks today")  step 1 = ir_publication
+    ===> Call this FIRST for "catch me up on X", "what happened at X / why", "how did
+    X's quarter look", "anything before X's earnings?", and BEFORE aiming
+    explore_data_catalogue, list_realtime_events or a report tool at a company.
+    When the question is about one event, pass it as `event_type` AND `card_types`
+    (halves the payload: the cards of every other present type are dropped):
+      situate(symbols=["OKTA"])                                           catch-up
+      situate(symbols=["MAR"], event_type="financials_release",
+              card_types=["financials_release"])                         the 10-Q
+      situate(symbols=["CLX"], event_type="ir_publication",
+              card_types=["ir_publication"])                              the deck
+    Market-wide questions with no company ("any earnings today?", "biggest movers")
+    are not this tool: list_options("event_types") -> list_realtime_events.
 
-    It reads the company event web (what HAPPENED to this company), the event ontology
-    (what that KIND of event entails, what follows it and how soon, where its payload
-    lives after the 12h realtime cache, when each table next refreshes) and market
-    status, and composes them into ONE response:
-      market          exchange, is_open, session
-      symbols[S]      web (newest 12 nodes; full graph via get_company_event_web),
-                      newest_event, episode (the DOMINANT episode in the window — its
-                      anchor and each member arrived | pending | overdue with rate and
-                      expected_by), cache.present / cache.expired (inferred from node
-                      age vs the TTL), freshness[] (per relation: last_refresh_at,
-                      next_run_at, reflects_newest_event), cards (trimmed ontology
-                      cards), deepen (tools the ontology says deepen this event)
-      universe        (no symbols) shape (named_types | family | sweep), asked_types,
-                      the plan order and cards, and event_types: the WHOLE realtime
-                      corpus (type, family, one-line description) so you never guess
-      plan[]          ORDERED tool calls: {step, tool, args, why, auth, sync, optional,
-                      provenance, fallback}. `tool` is an exact tool name and `args`
-                      are valid for it — pass them through unchanged.
-      skip[]          calls that would return nothing or waste a job (an event type
-                      that aged out of the cache, a 10-minute report) — DO NOT make these.
-      suggest[]       calls to make ONLY IF their `when` arises after the plan has run
-                      (explore_data_catalogue lives here, never in plan[]: it is a
-                      multi-minute job, and "the user wants more than the 12h cache
-                      holds" is the situation that earns it).
-      guidance[]      situation-scoped rules: which tables have NOT refreshed since the
-                      event, which followers are overdue, filer-scoped 13F nodes.
+    Returns {"situations": {SYMBOL: situation}}, one per symbol (a symbol that failed
+    carries {"error"} instead). A situation is the backend's /situate-company slice:
+      as_of / ontology_as_of / realtime_cache_ttl_hours (12: older events are out of
+                      the realtime cache; read the card's persisted_in table instead)
+      present_types   event types with a node in the window
+      web             {nodes, edges}: the newest node per event type and per table
+                      over window_days. Edges carry `cause`: same_chain_run (observed:
+                      one chain run wrote both — a table linked this way to the event
+                      REFLECTS it), lineage (declared), co_occurrence (temporal only,
+                      never causation). `at` is a write time, not a business date.
+                      Node `fetch` hints name the follow-up call; a signed_query_url
+                      goes to get_signed_sql_drilldown verbatim.
+      cards           event-type cards: persisted_in, sources, entails (tables written
+                      by layer, and realtime events that follow with rate and lag),
+                      preceded_by
+      relations       table cards: layer, refreshed_by (schedule, next_run_at), and
+                      read_by — THE TOOL THAT READS IT. Prefer the first tool there
+                      over explore_data_catalogue (company_financials for the EDGAR
+                      statements, get_company_snapshot, predict_earnings_move, ...).
+      entailed        [{relation, layer, provenance, via}]: tables the events entail,
+                      already routed to this company's EDGAR or FMP side
+      edgar_filer / routed_out / source_routing
+                      which side of the EDGAR/FMP split serves the company; never query
+                      a routed_out table for it
 
-    HOW TO EXECUTE:
-      1. Run plan[] in order. `sync=false` steps return a task_id — poll
-         get_task_status.
-      2. Never make a call that appears in skip[]; quote its `why` if the user asks.
-         Make a suggest[] call only when its `when` is true — an empty realtime list
-         is NOT that condition; say the cache is cold instead.
-      3. Read guidance[] before writing: an "overdue" follower is "not recorded yet",
-         not "did not happen"; a relation with reflects_newest_event=false shows the
-         PRIOR period, never the reaction.
-      4. Go beyond the plan only for what it did not cover — then get_company_event_web
-         (full graph, wider window) and get_event_ontology (full card / relation /
-         family) tell you what to call next.
-    Skip this tool ONLY for pure enumeration (list_options), an explicit "get me the
-    existing report" (get_latest_report), or a metric-history question with no event
-    in it ("Micron EPS growth over 8 quarters" -> explore_data_catalogue).
+    HOW TO USE IT:
+      1. Read web + cards for what happened; a node whose type is still inside the
+         12h cache -> list_realtime_events(event_type, tickers=[symbol]); older ->
+         its card's persisted_in table.
+      2. For each table that refreshed for the event (same_chain_run edge, or written
+         after it), call the tool its relation card's read_by names first — e.g.
+         company_financials(symbol, financial_type=<the table>, limit=5,
+         line_items=[...]). explore_data_catalogue only for what no read_by tool covers.
+      3. A table whose refreshed_by next_run_at is after the event does NOT reflect
+         it yet: it shows the prior period. A follower missing from the web is "not
+         recorded yet", not "did not happen". An empty web is not a quiet week:
+         widen window_days.
+    get_company_event_web gives the raw graph (up to 200 nodes, no dedup);
+    get_event_ontology gives any full card.
 
-    degraded=true means a source was unavailable (ontology not built, a web errored);
-    the plan still runs on what remains — follow it, and say what was unknown.
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
-    now = datetime.now(timezone.utc)
-    onto_task = _ontology_graph(ctx)
-    market_task = _send(ctx, "GET", "/is-market-open", params={"exchange": "NYSE"}, require_auth=False)
-    syms = [s.strip().upper() for s in (symbols or []) if s and s.strip()][:5]
-    corpus_task = _realtime_event_corpus(ctx) if not syms else asyncio.sleep(0, result=[])
-    web_tasks = [
-        _send(ctx, "GET", "/get-company-event-web",
-              params={"symbol": s, **({"window_days": window_days} if window_days else {})},
-              require_auth=False)
-        for s in syms
-    ]
-    onto, market_raw, corpus, *webs = await asyncio.gather(onto_task, market_task, corpus_task, *web_tasks)
+    syms = list(dict.fromkeys(s.strip().upper() for s in symbols if s and s.strip()))[:5]
+    if not syms:
+        raise ToolError("Pass at least one ticker in `symbols`, e.g. [\"MAR\"].")
+    params: dict[str, Any] = {
+        "sections": list(sections) if sections else list(SITUATE_DEFAULT_SECTIONS),
+        "include_fetch": "true" if include_fetch else "false",
+    }
+    keys = SITUATE_DEFAULT_KEYS if include_keys is None else include_keys
+    if keys:
+        params["include_keys"] = list(keys)
+    if event_type:
+        params["event_type"] = event_type.strip()
+    if card_types:
+        params["card_types"] = list(card_types)
+    if window_days:
+        params["window_days"] = window_days
 
-    market = situate_mod.parse_market(market_raw)
-    degraded: list[str] = []
-    if market.get("error"):
-        degraded.append(f"market status unavailable: {market['error']}")
-    if not isinstance(onto, dict) or "error" in onto or onto.get("degraded"):
-        degraded.append("event ontology unavailable — followers, freshness and persisted_in are unknown; "
-                        "plan built from the web's fetch hints only")
-        cards, relations, episodes, ttl, onto_as_of = {}, {}, {}, situate_mod.DEFAULT_TTL_HOURS, None
-    else:
-        cards = onto.get("event_types") or {}
-        relations = onto.get("relations") or {}
-        episodes = onto.get("episodes") or {}
-        ttl = int(onto.get("realtime_cache_ttl_hours") or situate_mod.DEFAULT_TTL_HOURS)
-        onto_as_of = onto.get("as_of")
-
-    # Route from what the question NAMES: realtime event types first (checked against the
-    # live ontology when it is available), then the family. A miss is None, never a default.
-    qtypes = situate_mod.question_event_types(question, cards or None)
-    qfam = situate_mod.question_family(question, qtypes, cards)
-
-    plan: list = []
-    skip: list = []
-    guidance: list = []
-    symbol_blocks: dict[str, Any] = {}
-    universe_block = None
-    if syms:
-        for s, web in zip(syms, webs):
-            block, p, k, g = situate_mod.situate_symbol(
-                s, web, cards, relations, episodes, ttl, market, now, qfam, qtypes)
-            symbol_blocks[s] = block
-            plan += p; skip += k; guidance += g
-            if block.get("error"):
-                degraded.append(f"{s}: event web errored ({block['error']})")
-    else:
-        universe_block, p, k, g = situate_mod.situate_universe(
-            qfam, cards, episodes, market, now, qtypes, ttl, corpus)
-        plan += p; skip += k; guidance += g
-
-    return situate_mod.compose(
-        "symbol" if syms else "universe", market, ttl, now, symbol_blocks, universe_block,
-        plan, skip, guidance, degraded, onto_as_of,
-    )
+    results = await asyncio.gather(*[
+        _send(ctx, "GET", "/situate-company", params={"symbol": s, **params}) for s in syms])
+    errors = [r for r in results if isinstance(r, dict) and "error" in r and set(r) <= {"error", "detail"}]
+    if len(errors) == len(results):
+        _ok(errors[0])  # every symbol failed: raise the backend error instead of returning only errors
+    return {"situations": dict(zip(syms, results))}
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List Real-Time Market Events", readOnlyHint=True))
@@ -206,13 +174,11 @@ async def list_realtime_events(
 ) -> RealtimeEventsResult:
     """Pull live market events from the backend's Redis-backed cache (12h TTL).
 
-    ===> Call `situate(...)` FIRST (symbols=[...] for named companies, none for the
-    market): its `cache.present` / `cache.expired` say which types this tool can
-    still return, its `plan` carries the exact calls to make, and its `skip` list
-    names the ones that would return [] — an event older than the 12h cache lives
-    in the ontology card's `persisted_in` relation, not here. Never call this for a
-    type situate marked expired. `list_options("event_types")` remains the
-    enumeration of valid type strings and descriptions. `event_type` is REQUIRED and
+    ===> For a named company, call `situate(symbols=[...])` FIRST: its web says which
+    event types fired and when. A node older than the 12h cache returns [] here —
+    its payload lives in the card's `persisted_in` table instead. For the market
+    (no company), `list_options("event_types")` enumerates the valid type strings
+    and descriptions; pick the type the question names. `event_type` is REQUIRED and
     has no default on purpose: the type is the whole question, and a default
     would answer a different one (eps_update is one slice of the earnings
     family, not the family).
@@ -323,11 +289,12 @@ async def get_company_event_web(
 ) -> CompanyEventWebResult:
     """Fetch the connected WEB of what recently HAPPENED to a company — the WHY behind its snapshot, and a time-ordered graph to CHAIN your next calls off.
 
-    ===> `situate(symbols=[symbol])` already returns this web (newest 12 nodes) PLUS
-    the ontology cards, cache state and an ordered plan — start there. Call this
-    tool directly for the FULL graph or a wider `window_days`, and pair every node
-    you chain off with get_event_ontology(event_type=node.type): the web says WHICH
-    event, the ontology says what it entails and what to do about it.
+    ===> `situate(symbols=[symbol])` already returns this web deduped to the newest
+    node per event type and per table, PLUS the ontology cards and the table cards
+    with read_by — start there. Call this tool directly for the RAW graph (every
+    node, no dedup) or a different `window_days`, and pair every node you chain off
+    with get_event_ontology(event_type=node.type): the web says WHICH event, the
+    ontology says what it entails and what to do about it.
 
     ===> A FIRST-LINE TOOL FOR SINGLE-COMPANY QUESTIONS, not a specialist one. Reach
     for it whenever the user asks what has been going on with a name ("catch me up on
@@ -335,7 +302,7 @@ async def get_company_event_web(
     earnings?"), asks WHY the company looks the way it does ("why is the thesis
     negative?", "what drove the downgrade?", "what changed?"), or whenever you are
     about to aim a targeted `explore_data_catalogue`, `generate_report_for_stock`, or
-    `list_realtime_events` request at ONE symbol. Synchronous, cheap, and public —
+    `list_realtime_events` request at ONE symbol. Synchronous and cheap —
     one call turns "I'll guess which event types and dates matter" into "here are
     the exact events, their timestamps, the tables that were written, and the call
     that returns each full payload".
@@ -393,9 +360,8 @@ async def get_company_event_web(
       2. When a `data_update` node's `fetch` carries `signed_query_url`, call
          `get_signed_sql_drilldown` with it FIRST — zero planning, and it returns the
          new record (`is_new_record: true`) plus the context rows to read it against.
-         That follow-up needs the user SIGNED IN (this tool does not); if it comes back
-         not-authenticated, the link is fine — say sign-in is needed for the rows and
-         fall back to an `explore_data_catalogue` query on the node's `relation`.
+         If it comes back not-authenticated, the link is fine — the user's sign-in
+         lapsed; say so rather than altering the token.
          Otherwise use the node's `fetch` query if it has one, or its `relation` and
          `at` to write a PRECISE `explore_data_catalogue` query ("insider filings for
          WM since 2026-08-09", "13F position changes for WM in the last week")
@@ -423,9 +389,7 @@ async def get_company_event_web(
         is uncovered. Say so, and fall back to `list_realtime_events` /
         `explore_data_catalogue` rather than concluding it was a quiet week.
 
-    PUBLIC at the backend — no account, plan, or entitlement is needed, the same
-    posture as `get_company_snapshot`. (The MCP connection itself still carries the
-    client's OAuth session; that gate is transport-wide, not this tool's.)
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
     Rate-limited 60/min.
 
     Every node's `type`, `relation` and `family` are join keys into get_event_ontology:
@@ -442,7 +406,7 @@ async def get_company_event_web(
         params["max_nodes"] = max_nodes
     return _ok(await _send(
         ctx, "GET", "/get-company-event-web",
-        params=params, require_auth=False,
+        params=params,
     ))
 
 
@@ -468,10 +432,10 @@ async def get_event_ontology(
 ) -> EventOntologyResult:
     """The platform's event ONTOLOGY — what an event TYPE means for everything else. Call it FIRST on any real-time, single-company, or event-driven request; it is the map the other calls are planned from.
 
-    ===> `situate(...)` composes this with the event web and the cache state and
-    hands you a plan — start there. Call this tool directly for the FULL card of an
-    event type, a relation card, a whole family, or the unfiltered graph, when the
-    plan did not cover what you need next.
+    ===> For a named company, `situate(symbols=[...])` returns the cards of the event
+    types in its web and the table cards they entail — start there. Call this tool
+    directly for the FULL card of an event type, a relation card, a whole family, or
+    the unfiltered graph, and for market-wide questions with no company.
 
     ===> REQUISITE for: any real-time / live-events request, any "what
     happened / why / catch me up" question, and BEFORE aiming explore_data_catalogue or
