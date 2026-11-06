@@ -133,6 +133,63 @@ class DocumentSectionResult(BaseModel):
     transcript_url: Optional[str] = Field(None, description="Full call link; frequently null.")
 
 
+class TranscriptGuidanceRow(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    symbol: Optional[str] = None
+    date: Optional[str] = Field(None, description="CALL date (YYYY-MM-DD), not a fiscal period.")
+    guidance_outlook: Optional[str] = Field(None, description="RAISED, INLINE, REVISED DOWNWARDS or NOT_PROVIDED.")
+    last_updated: Optional[str] = Field(None, description="When the label was written.")
+
+
+class TranscriptGuidanceResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    symbol: str
+    count: int = Field(description="Rows returned: at most `limit` classified calls.")
+    rows: list[TranscriptGuidanceRow] = Field(description="Newest call first.")
+    note: Optional[str] = Field(None, description="Set only when no rows came back: what an empty result can mean.")
+
+
+class TranscriptCitation(BaseModel):
+    """The source behind one [n] marker in a transcript analysis's narrative fields."""
+
+    model_config = ConfigDict(extra="allow")
+
+    n: Optional[int] = Field(None, description="The [n] marker this entry resolves.")
+    url: Optional[str] = Field(
+        None, description="Link to one speaker turn; its symbol, year, quarter and n are get_document_section's arguments."
+    )
+    title: Optional[str] = Field(None, description="Speaker and section number.")
+    quotes: Optional[list[str]] = Field(None, description="Verbatim passages from that section.")
+
+
+class TranscriptAnalysisRow(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    symbol: Optional[str] = None
+    date: Optional[str] = Field(None, description="CALL date (YYYY-MM-DD), not a fiscal period.")
+    summary: Optional[str] = Field(None, description="What the call said.")
+    added: Optional[str] = Field(None, description="New on this call versus the prior one.")
+    removed: Optional[str] = Field(None, description="On the prior call, gone from this one.")
+    strengthened: Optional[str] = Field(None, description="Language or outlook firmer than on the prior call.")
+    weakened: Optional[str] = Field(None, description="Language or outlook softer than on the prior call.")
+    unchanged_but_reinforced: Optional[str] = Field(None, description="Themes repeated with emphasis.")
+    last_updated: Optional[str] = Field(None, description="When the analysis was written.")
+    source_urls: Optional[list[TranscriptCitation]] = Field(
+        None, description="Resolves the [n] markers in the narrative fields; null on calls without stored citations."
+    )
+
+
+class TranscriptAnalysisResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    symbol: str
+    count: int = Field(description="Rows returned; a re-analyzed call can take two.")
+    rows: list[TranscriptAnalysisRow] = Field(description="Newest call first.")
+    note: Optional[str] = Field(None, description="Set only when no rows came back: what an empty result can mean.")
+
+
 class SaveQueryResult(BaseModel):
     model_config = ConfigDict(extra="allow")
 

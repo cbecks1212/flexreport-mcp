@@ -20,6 +20,8 @@ from schemas.data_exploration import (
     SaveQueryResult,
     TaskDispatch,
     TraceSourcesResult,
+    TranscriptAnalysisResult,
+    TranscriptGuidanceResult,
 )
 
 
@@ -981,3 +983,111 @@ async def delete_saved_query(
         ctx, "DELETE", "/delete-saved-query",
         params={"query_id": query_id},
     ))
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Get Transcript Guidance", readOnlyHint=True))
+async def get_transcript_guidance(
+    ctx: Context,
+    symbol: Annotated[str, Field(description="Covered ticker, e.g. \"AAPL\".")],
+    limit: Annotated[
+        int,
+        Field(description="Most recent calls to return (1-20, default 4, about a year of calls).", ge=1, le=20),
+    ] = 4,
+) -> TranscriptGuidanceResult:
+    """One company's guidance label call by call (RAISED, INLINE, REVISED DOWNWARDS or NOT_PROVIDED) — the direct read for "did X cut guidance" and how its guidance posture has moved call over call.
+
+    ===> Prefer this over explore_data_catalogue for one company's labels: it is synchronous
+    and returns the rows directly. It takes one symbol, so a market-wide question ("who
+    raised guidance this season") belongs in explore_data_catalogue.
+
+    LABELS:
+      RAISED             management explicitly raised the outlook or signalled stronger
+                         forward expectations
+      INLINE             reaffirmed or maintained the prior outlook, or gave fresh guidance
+                         consistent with consensus or the prior trajectory. Also the label
+                         when signals truly balance out
+      REVISED DOWNWARDS  cut, lowered, walked down to the low end, or signalled weaker
+                         forward expectations
+      NOT_PROVIDED       no forward guidance, withdrawn with no replacement, or the call's
+                         analysis is silent on the outlook
+
+    A label is a model's judgment of the call's narrative analysis, not a comparison of
+    guidance numbers, and it is the DOMINANT signal when a company raised one metric and
+    cut another. Before you publish one, or to say what was actually guided, read the same
+    call's `get_transcript_analysis`.
+
+    Returns {"symbol": ..., "count": N, "rows": [{"symbol", "date", "guidance_outlook",
+    "last_updated"}]}, newest call first. `date` is the CALL date, not a fiscal period. The
+    newest row may be from last quarter if this quarter's call has not happened yet, so
+    check its date before calling it current. A re-analyzed call can rarely hold two labels
+    a few days apart: treat them as one call and say so if they differ. `note` is set only
+    on an empty result.
+
+    Errors: a 404 means the ticker is outside coverage.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    Rate-limited 500/min.
+    """
+    symbol = symbol.strip().upper()
+    rows = _ok(await _send(ctx, "POST", "/transcript-guidance", json={"symbol": symbol, "limit": limit}))
+    if not isinstance(rows, list):
+        raise ToolError(f"Unexpected /transcript-guidance response: {str(rows)[:500]}")
+    note = f"{symbol} is covered, but has no classified earnings call yet." if not rows else None
+    return TranscriptGuidanceResult(symbol=symbol, count=len(rows), rows=rows, note=note)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Get Transcript Analysis", readOnlyHint=True))
+async def get_transcript_analysis(
+    ctx: Context,
+    symbol: Annotated[str, Field(description="Covered ticker, e.g. \"AAPL\".")],
+    limit: Annotated[
+        int,
+        Field(description="Most recent analyses to return (1-8, default 1). 1 is the latest call; raise it to compare calls.",
+              ge=1, le=8),
+    ] = 1,
+) -> TranscriptAnalysisResult:
+    """One company's call-over-call earnings transcript analysis: the call's summary and what it added, removed, strengthened, weakened or reinforced against the prior call — the direct read for "what changed on X's call", "what did management stop talking about", and how the narrative has moved.
+
+    ===> Prefer this over explore_data_catalogue, and over reading the transcript turn by
+    turn, for what a call said: it is synchronous and returns the rows directly. For the
+    guidance label alone, use `get_transcript_guidance`.
+
+    FIELDS, per row: `summary`, then `added`, `removed`, `strengthened`, `weakened` and
+    `unchanged_but_reinforced`, each against the PRIOR call. They are a model's analysis
+    of the transcript, not quotes: attribute them to the analysis, and quote only from
+    `source_urls[].quotes` or the transcript itself. `date` is the CALL date, not a fiscal
+    period.
+
+    CITATIONS: an `[n]` marker in the text resolves to the `source_urls` entry with the same
+    `n`: {n, url, title, quotes, node_id}. `quotes` are verbatim passages, and the `url`'s
+    symbol, year, quarter and n are the arguments to `get_document_section`, which opens that
+    speaker turn. Year and quarter there are FISCAL; take them from the url, never from
+    `date`. Only some calls have citations stored (none before May 2026): elsewhere
+    `source_urls` is null and the text has no markers. Say that text is uncited analysis:
+    trace_data_sources has no link for those calls either.
+
+    `limit` COUNTS ROWS, NOT CALLS: a re-analyzed call can appear twice, on the same date or
+    a day apart, with near-identical text. Treat those as one call. Rows with citations run
+    about 15 KB each, so keep the default unless the question compares calls.
+
+    Returns {"symbol": ..., "count": N, "rows": [...]}, newest call first. `note` is set
+    only on an empty result.
+
+    Errors: a 404 means the ticker is outside coverage.
+
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    Rate-limited 500/min.
+    """
+    symbol = symbol.strip().upper()
+    rows = _ok(await _send(ctx, "POST", "/transcript-analysis", json={"symbol": symbol, "limit": limit}))
+    if not isinstance(rows, list):
+        raise ToolError(f"Unexpected /transcript-analysis response: {str(rows)[:500]}")
+    for row in rows:
+        # A jsonb column the endpoint hands back as a JSON string.
+        if isinstance(row, dict) and isinstance(row.get("source_urls"), str):
+            try:
+                row["source_urls"] = json.loads(row["source_urls"])
+            except ValueError:
+                row["source_urls"] = None
+    note = f"{symbol} is covered, but has no analyzed earnings call yet." if not rows else None
+    return TranscriptAnalysisResult(symbol=symbol, count=len(rows), rows=rows, note=note)
