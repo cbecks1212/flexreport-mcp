@@ -99,7 +99,7 @@ Tools: `explore_data_catalogue` (transcripts, fundamentals, estimates), `trace_d
 
 ## Tools
 
-59 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
+62 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
 
 ### Situate & real-time events (`tools/realtime_events.py`)
 
@@ -165,6 +165,16 @@ Default delivery for a live-streaming ask is a dashboard (in Claude, an Artifact
 | `list_earnings_announcements(start_date, end_date, symbols, industry, sector, market_cap)` | `POST /list-upcoming-earnings-announcements` | Scheduled earnings announcements in a date window (both default to today), covered names only; `sector` / `industry` / `market_cap` validated server-side (422 on a bad value) |
 | `is_market_open(exchange)` | `GET /is-market-open` | Is an exchange open now — returns a single `is_open` boolean (exchange code, default `NYSE`) — routes between `detect_intraday_outlier_jumps` (open) and `get_aftermarket_data` (closed). Public |
 
+### Institutional ownership (`tools/institutional_ownership.py`)
+
+| Tool | Backend endpoint | What it does |
+|---|---|---|
+| `get_13f_position_changes(cik, position_filter)` | `POST /13f-position-change` | One filer's positions in its **latest filed quarter**, one row per position with share and value changes and `sec_urls`. `position_filter` defaults to `NEW` + `CLOSED` here (the API defaults to all five; BlackRock's full book is 2,680 rows, 1.16 MB). Returns `{cik, position_filter, count, rows, note}` |
+| `get_13f_ownership_by_manager_type(symbol, manager_type, limit)` | `POST /13f-position-by-manager-type` | One symbol's institutional ownership **by manager type, per quarter**. `limit` counts quarters (1-8, default 8). Changes are percentages of value, so they include price moves. Returns `{symbol, count, rows, note}` |
+| `get_13f_cik_allocation(cik, group_by, limit)` | `POST /13f-cik-allocation` | One filer's **portfolio weights** by sector or industry against all institutions. `weight_pct` is a share of `covered_value`, so report `coverage_pct` with it. `limit` defaults to 8 quarters for sector and 2 for industry (about 300 KB at 8). Returns `{cik, group_by, limit, count, rows, note}` |
+
+All three are synchronous and need auth (100/min, counts toward plan quota). The CIK comes from `list_options("institutional_managers", q=...)`.
+
 ### Data feeds (`tools/data_feeds.py`)
 
 | Tool | Backend endpoint | What it does |
@@ -201,7 +211,7 @@ Default delivery for a live-streaming ask is a dashboard (in Claude, an Artifact
 | Tool | Backend endpoint | What it does |
 |---|---|---|
 | `get_task_status(task_id)` | `GET /task-status` | Poll an async job to `SUCCESS` and read its `result`. Results over 8 MB (`MCP_MAX_TASK_RESULT_BYTES`) are refused with a "narrow the query" error; every other backend response is capped at 16 MB (`MCP_MAX_RESPONSE_BYTES`) in `_send` |
-| `list_options(kind, ticker, q, cik)` | `GET /list-realtime-event-options`, `/list-financial-items`, `/list-financial-ratios`, `/list-as-reported-items?ticker=`, `/list-revenue-segments?ticker=`, `/list-institutional-managers?q=&cik=`, `/get-sectors`, `/list-institutional-investor-types`, `/list-countries`, `/get-fiscal-quarter`, `/list-marketcap-options`, `/list-intraday-chart-options`, `/list-technical-indicators`, `/list-tickers`, `/list-symbols-with-names`, `/list-data-feed-options` | One catalogue tool: enumerate valid values for a parameter (event types, line items, ratios, a filer's own as-reported XBRL concepts and revenue segments (`ticker`), institutional managers by name fragment / CIK (`q` / `cik`), sectors, investor types, countries, fiscal quarter, market-cap buckets, intraday frequencies, technical indicators, the ticker universe with or without company names, and the `download_dataset` feeds) |
+| `list_options(kind, ticker, q, cik, manager_type, limit, offset)` | `GET /list-realtime-event-options`, `/list-financial-items`, `/list-financial-ratios`, `/list-as-reported-items?ticker=`, `/list-revenue-segments?ticker=`, `/list-institutional-managers?q=&cik=&manager_type=&limit=&offset=`, `/get-sectors`, `/list-institutional-investor-types`, `/list-countries`, `/get-fiscal-quarter`, `/list-marketcap-options`, `/list-intraday-chart-options`, `/list-technical-indicators`, `/list-tickers`, `/list-symbols-with-names`, `/list-data-feed-options` | One catalogue tool: enumerate valid values for a parameter (event types, line items, ratios, a filer's own as-reported XBRL concepts and revenue segments (`ticker`), institutional managers by name fragment / CIK / manager type (`q` / `cik` / `manager_type`, paged with `limit` / `offset`), sectors, investor types, countries, fiscal quarter, market-cap buckets, intraday frequencies, technical indicators, the ticker universe with or without company names, and the `download_dataset` feeds) |
 | `list_sub_industries(sectors)` | `GET /get-sub-industries` | Distinct industries within the given sector(s) |
 | `onboard_symbol(symbol)` | `POST /onboard-symbol` | Request onboarding of an uncovered ticker (async, authed, 5/hour) |
 | `upgrade_plan()` | `GET /payment/upgrade-link` | Checkout link to upgrade or change the user's plan (e.g. after hitting a quota); payment completes in the browser |
@@ -240,6 +250,7 @@ tools/
   data_exploration.py    explore_data_*, signed drilldowns, trace_data_sources, document sections, saved queries
   utility.py             get_task_status, list_options, list_sub_industries, onboard_symbol, billing
   market_data.py         technical indicators, intraday outliers, after-hours bars, earnings calendar + move prediction, market status
+  institutional_ownership.py  13F position changes, ownership by manager type, portfolio allocation
   data_feeds.py          download_dataset (versioned daily feed files), user datasets (draft / save / list / delete)
   strategies.py          screen_stocks, portfolio optimization, stock picks, strategy track records
   scheduling.py          schedule / list / delete scheduled tasks
