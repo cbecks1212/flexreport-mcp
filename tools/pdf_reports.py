@@ -73,7 +73,7 @@ async def generate_report_for_stock(
         Optional[list[str]],
         Field(description="Managers to feature, by SEC CIK (any width; the backend pads to 10 digits). Get them "
                           "from list_options(\"institutional_managers\", q=\"berkshire\") -> {cik, name, category, "
-                          "aum}; pass the `cik` values, never names."),
+                          "current_portfolio_value}; pass the `cik` values, never names."),
     ] = None,
     include_as_report_financials: Annotated[
         bool,

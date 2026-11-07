@@ -41,12 +41,12 @@ _OPTION_ENDPOINTS = {
 
 # Catalogues that take a query parameter: a filer's own vocabularies (its tagged XBRL
 # concepts, its revenue segments) need a `ticker`; the manager lookup needs a name
-# fragment `q` and/or a SEC `cik`. `list_options` forwards whichever were passed and
-# refuses the call when none of the kind's parameters is present.
+# fragment `q`, a SEC `cik` and/or a `manager_type`. `list_options` forwards whichever
+# were passed and refuses the call when none of the kind's parameters is present.
 _OPTION_QUERY_PARAMS: dict[str, tuple[str, ...]] = {
     "as_reported_items": ("ticker",),
     "revenue_segments": ("ticker",),
-    "institutional_managers": ("q", "cik"),
+    "institutional_managers": ("q", "cik", "manager_type"),
 }
 
 # The `kind` schema advertised to MCP clients. Members must stay in lockstep
@@ -124,12 +124,23 @@ async def list_options(
     cik: Annotated[
         Optional[str], Field(description="SEC CIK, any width, e.g. \"1067983\" (institutional_managers).")
     ] = None,
+    manager_type: Annotated[
+        Optional[str],
+        Field(description="One value from list_options(\"institutional_investor_types\"), e.g. \"Pension Fund\" "
+                          "(institutional_managers)."),
+    ] = None,
+    limit: Annotated[
+        Optional[int], Field(description="Rows per page, 1-500, default 50 (institutional_managers).", ge=1, le=500)
+    ] = None,
+    offset: Annotated[
+        Optional[int], Field(description="Rows to skip, default 0; past the end returns [] (institutional_managers).", ge=0)
+    ] = None,
 ) -> ListOptionsResult:
     """Enumerate the valid values for a parameter, straight from the backend.
 
     Call this BEFORE guessing a parameter value. `kind` selects which catalog; three
-    kinds are scoped by a query parameter (`ticker`, or `q` / `cik`) and refuse the call
-    without it:
+    kinds are scoped by a query parameter (`ticker`, or `q` / `cik` / `manager_type`) and
+    refuse the call without it:
 
     - "event_types"                  -> valid `event_type` for `list_realtime_events`
                                         (eps_update, company_update, biggest_mover, ...)
@@ -150,15 +161,21 @@ async def list_options(
                                         latest_period, facts} — for a custom report's
                                         `revenue_segment` (pass the product_label).
                                         A name lookup only: never sum members across it
-    - "institutional_managers"       -> NEEDS `q` (name fragment, e.g. "berkshire")
-                                        and/or `cik` (SEC CIK, any width). Managers as
-                                        {cik, name, category, aum}, largest AUM first —
-                                        pass the `cik` values as a custom report's
-                                        `institutional_ownership`, never the names
+    - "institutional_managers"       -> NEEDS `q` (name fragment, e.g. "berkshire"),
+                                        `cik` (SEC CIK, any width) and/or `manager_type`
+                                        (from "institutional_investor_types"). Managers as
+                                        {cik, name, category, current_portfolio_value},
+                                        largest first. The value is the 13F cover-page total,
+                                        not AUM, and can include options. Page with `limit`
+                                        and `offset`. Pass the `cik` values, never the names,
+                                        to get_13f_position_changes, get_13f_cik_allocation
+                                        or a custom report's `institutional_ownership`
     - "sectors"                      -> valid `sector` filter values
     - "institutional_investor_types" -> investor CATEGORIES (not managers) — the keys
                                         `screen_stocks(institutional_ownership=...)`
-                                        filters on
+                                        filters on, and the `manager_type` values for
+                                        "institutional_managers" and
+                                        get_13f_ownership_by_manager_type
     - "countries"                    -> covered countries
     - "fiscal_quarter"               -> the most recent fiscal quarter being reported
     - "market_cap"                   -> valid `market_cap` buckets (Small-cap,
@@ -187,11 +204,14 @@ async def list_options(
     reads the backend's live config, not a hardcoded list. Public — no auth required.
     """
     wanted = _OPTION_QUERY_PARAMS.get(kind, ())
-    given = {"ticker": ticker, "q": q, "cik": cik}
+    given = {"ticker": ticker, "q": q, "cik": cik, "manager_type": manager_type}
     params = {name: given[name] for name in wanted if given[name]}
     if wanted and not params:
         _ok({"error": f'list_options("{kind}") needs {" and/or ".join(wanted)} — '
                       "pass it as a keyword argument."})
+    if kind == "institutional_managers":
+        # After the guard: paging alone must not satisfy "needs a parameter".
+        params.update({k: v for k, v in {"limit": limit, "offset": offset}.items() if v is not None})
     options = _ok(await _send(
         ctx, "GET", _OPTION_ENDPOINTS[kind],
         params=params or None, require_auth=False,
