@@ -101,6 +101,9 @@ async def situate(
 ) -> dict[str, Any]:
     """THE FIRST CALL. What is going on right now — for named companies, or for the whole market — from the backend's situation endpoints. Call it before any other flexreport tool on anything about a company, an event, or "now".
 
+    Both scopes also return `your_tools`: the tools this user relies on most, most used
+    first (absent for a new user). When several next steps fit, prefer those.
+
     TWO SCOPES (each parameter's description says which it belongs to):
 
     WITH symbols -> GET /situate-company, one call per symbol. For "catch me up on
@@ -179,8 +182,11 @@ async def situate(
         if event_type or card_types:
             raise ToolError("`event_type` / `card_types` apply WITH symbols. For the market, pass "
                             "event_types=[...] (or family, or question).")
-        return _ok(await _send(ctx, "GET", "/situate-market", params=_market_params(
-            event_types, family, question, top_tickers, report_inventory, include_keys)))
+        market, mine = await asyncio.gather(
+            _send(ctx, "GET", "/situate-market", params=_market_params(
+                event_types, family, question, top_tickers, report_inventory, include_keys)),
+            _user_tools(ctx))
+        return _with_user_tools(_ok(market), mine)
     if event_types or family:
         raise ToolError("`event_types` / `family` apply with NO symbols. For a company, pass "
                         "event_type=\"...\" and card_types=[...].")
@@ -199,12 +205,26 @@ async def situate(
     if window_days:
         params["window_days"] = window_days
 
-    results = await asyncio.gather(*[
-        _send(ctx, "GET", "/situate-company", params={"symbol": s, **params}) for s in syms])
+    *results, mine = await asyncio.gather(*[
+        _send(ctx, "GET", "/situate-company", params={"symbol": s, **params}) for s in syms], _user_tools(ctx))
     errors = [r for r in results if isinstance(r, dict) and "error" in r and set(r) <= {"error", "detail"}]
     if len(errors) == len(results):
         _ok(errors[0])  # every symbol failed: raise the backend error instead of returning only errors
-    return {"situations": dict(zip(syms, results))}
+    return _with_user_tools({"situations": dict(zip(syms, results))}, mine)
+
+
+async def _user_tools(ctx: Context) -> list[str]:
+    """This user's most-used tools for situate's `your_tools`. [] when there are none or the
+    lookup fails, so personalisation never breaks situate."""
+    data = await _send(ctx, "GET", "/user-relevant-tools")
+    if not isinstance(data, dict) or "error" in data:
+        return []
+    return data.get("relevant_tools") or []
+
+
+def _with_user_tools(result: Any, tools: list[str]) -> Any:
+    """Put `your_tools` first in a situate result, so it is read before the events."""
+    return {"your_tools": tools, **result} if tools and isinstance(result, dict) else result
 
 
 def _market_params(event_types: Optional[list[str]], family: Optional[str], question: Optional[str],

@@ -16,6 +16,7 @@ from schemas.utility import (
     PlanUsage,
     SubIndustriesResult,
     TaskStatusResult,
+    UserTools
 )
 
 
@@ -279,6 +280,12 @@ async def onboard_symbol(
         ctx, "POST", "/onboard-symbol",
         params={"symbol": symbol},
     ))
+
+@mcp.tool(annotations=ToolAnnotations(title="Load relevant tools for user",readOnlyHint=True))
+async def load_user_relevant_tools(ctx: Context) -> UserTools:
+    """The Flexreport tools this user relies on most. Consider this as one of your first steps to create a personalized and consistent experience for the user. New users might not have any history. Empty responses can be expected.
+    """
+    return _ok(await _send(ctx, "GET", "/user-relevant-tools"))
 
 
 # --- Billing / plan upgrades ----------------------------------------------
