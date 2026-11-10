@@ -57,3 +57,7 @@ class BillingLinkResult(BaseModel):
     message: str = Field(description="Ready-to-show markdown for the user, including the link when there is one.")
     url: Optional[str] = Field(None, description="The browser link; null when it could not be generated.")
     usage: Optional[PlanUsage] = Field(None, description="Current plan usage (upgrade_plan only, when known).")
+
+class UserTools(BaseModel):
+    relevant_tools: Optional[list[str]] = Field(default=[], description="A list of a user's most used tool.")
+    as_of_date: Optional[str] = Field(default=None, description="Most used tools as of the date returned")
