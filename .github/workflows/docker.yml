@@ -1,0 +1,112 @@
+name: MCP Docker Pipeline
+
+# Every push to master builds and smoke-tests the image, pushes it tagged with the commit,
+# then points :latest at it and redeploys the ECS service.
+# Pull requests into master only build and smoke-test: no AWS access, no deploy.
+# AWS steps run only on master. The AWS role trusts only master too, so a manual run
+# on any other branch (e.g. the feature agent's feature/* branches) can never deploy.
+on:
+  push:
+    branches:
+      - master
+    paths-ignore: # nothing the image contains, so no redeploy
+      - "docs/**"
+      - "**.md"
+  pull_request: # no paths-ignore: a required check must always report
+    branches:
+      - master
+  workflow_dispatch: # manual "Run workflow" button for redeploys
+
+permissions:
+  id-token: write # lets the job log in to AWS with OIDC
+  contents: read
+
+env:
+  IMAGE: 018861568394.dkr.ecr.us-east-1.amazonaws.com/flexreport-mcp
+  AWS_REGION: us-east-1
+  CLUSTER: flexreport-api-cluster-2
+  SERVICE: flexreport-mcp
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image locally
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: flexreport-mcp:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # tests/ is gitignored, so the check is that the server and every tool module import cleanly.
+      - name: Smoke-test the image
+        run: docker run --rm --network none flexreport-mcp:test python -c "import server"
+
+      - name: Configure AWS credentials
+        if: github.ref == 'refs/heads/master'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        if: github.ref == 'refs/heads/master'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # provenance: false keeps a plain single-platform manifest; Fargate can reject the
+      # attestation index buildx adds by default.
+      - name: Push image tagged with the commit
+        if: github.ref == 'refs/heads/master'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/master' # never on pull requests or other branches
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency: production-deploy # never two deploys at once; the newest waiting push wins
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # The task definition runs :latest, so move that tag onto this commit's image.
+      # imagetools copies the manifest inside ECR; nothing is pulled or rebuilt.
+      - name: Tag this commit's image as latest
+        run: docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}:${GITHUB_SHA}"
+
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster "$CLUSTER" \
+            --service "$SERVICE" \
+            --force-new-deployment \
+            --region "$AWS_REGION" > /dev/null
+          aws ecs wait services-stable \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --region "$AWS_REGION"
