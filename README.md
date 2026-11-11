@@ -99,7 +99,7 @@ Tools: `explore_data_catalogue` (transcripts, fundamentals, estimates), `trace_d
 
 ## Tools
 
-62 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
+65 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
 
 ### Situate & real-time events (`tools/realtime_events.py`)
 
@@ -174,6 +174,16 @@ Default delivery for a live-streaming ask is a dashboard (in Claude, an Artifact
 | `get_13f_cik_allocation(cik, group_by, limit)` | `POST /13f-cik-allocation` | One filer's **portfolio weights** by sector or industry against all institutions. `weight_pct` is a share of `covered_value`, so report `coverage_pct` with it. `limit` defaults to 8 quarters for sector and 2 for industry (about 300 KB at 8). Returns `{cik, group_by, limit, count, rows, note}` |
 
 All three are synchronous and need auth (100/min, counts toward plan quota). The CIK comes from `list_options("institutional_managers", q=...)`.
+
+### Investor-relations documents (`tools/ir_documents.py`)
+
+| Tool | Backend endpoint | What it does |
+|---|---|---|
+| `list_ir_documents(symbol, limit)` | `POST /ir-document` | A company's **IR documents** (decks, presentations), newest first. `limit` 1-100, default 10. A row is `{document_url, symbol, title, doc_type, fiscal_year, fiscal_period, published_date, page_count, content_type, source_url, last_updated}`. `document_url` is the stored copy that `get_ir_document_content` takes; `source_url` is the company's IR-site link. Returns `{symbol, count, rows, note}` |
+| `get_ir_document_analysis(symbol, limit)` | `POST /ir-document-analysis` | The **analyst's read** of the most recent decks, with the latest analysis for each deck. `limit` 1-50, default 5. A row is `{symbol, document_url, source_url, title, doc_type, document_date, summary, key_takeaways, reported_metrics, guidance_commentary, flags, cited_pages, page_number_url, last_updated}`. `page_number_url` holds `document_url#page=N` links in cited order (empty when nothing was cited). Those links are the analysis's provenance, and the agent cites them whenever it repeats a figure. Returns `{symbol, count, rows, note}` |
+| `get_ir_document_content(url)` | `POST /ir-content` | A deck's **extracted text, page by page**: `{page_number, page_number_url, char_count, content}`. `url` must be a `document_url` (http(s), no whitespace, max 2048 characters). A trailing `#page=N` from a `page_number_url` is removed before the call. Returns `{url, count, pages, note}` |
+
+Typical chain: `list_ir_documents` → `get_ir_document_analysis` → `get_ir_document_content` for the cited pages. All three are synchronous and need auth (100/min per user, counts toward plan quota). The tools surface a 401 (sign-in expired) and a 429 (rate limit or plan quota hit) as tool errors.
 
 ### Data feeds (`tools/data_feeds.py`)
 
