@@ -99,7 +99,7 @@ Tools: `explore_data_catalogue` (transcripts, fundamentals, estimates), `trace_d
 
 ## Tools
 
-65 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
+67 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
 
 ### Situate & real-time events (`tools/realtime_events.py`)
 
@@ -184,6 +184,15 @@ All three are synchronous and need auth (100/min, counts toward plan quota). The
 | `get_ir_document_content(url)` | `POST /ir-content` | A deck's **extracted text, page by page**: `{page_number, page_number_url, char_count, content}`. `url` must be a `document_url` (http(s), no whitespace, max 2048 characters). A trailing `#page=N` from a `page_number_url` is removed before the call. Returns `{url, count, pages, note}` |
 
 Typical chain: `list_ir_documents` → `get_ir_document_analysis` → `get_ir_document_content` for the cited pages. All three are synchronous and need auth (100/min per user, counts toward plan quota). The tools surface a 401 (sign-in expired) and a 429 (rate limit or plan quota hit) as tool errors.
+
+### Earnings season (`tools/earnings_season.py`)
+
+| Tool | Backend endpoint | What it does |
+|---|---|---|
+| `get_earnings_season_cohort(symbol, sector, sp_index, country, marketcap_type, limit)` | `POST /earnings-season-cohort` | Each covered company's **latest earnings result this season**, one row per symbol, newest first. `limit` 1-1000, default 100. A row is `{symbol, sector, sp_index, country, marketcap_type, date, eps_actual, eps_estimated, revenue_actual, revenue_estimated, beat_flag, eps_yoy_change, cohort}`. `beat_flag` is `beat` / `miss` / `in_line`; `eps_yoy_change` is a **fraction** (0.12 = +12%, null with no prior-year actual); `cohort` is `sp500` / `beyond_sp500_us` / `other`. Returns `{filters, count, rows, note}` |
+| `list_ir_documents_season(symbol, sector, sp_index, country, marketcap_type, limit)` | `POST /ir-documents-season` | **IR decks and press releases published or ingested this season**, across companies, newest first. `limit` 1-500, default 50. A row is `{document_url, symbol, company_name, sector, industry, country, sp_index, marketcap_type, in_coverage_universe, document_date, published_date, ingested_at, doc_type, title, source_url, fiscal_year, fiscal_period, page_count, pages_extracted, has_extracted_text}`. Symbols are **not** limited to the coverage universe (`in_coverage_universe = false` marks the rest); rank recency on `document_date` (`published_date` is mostly null); `document_url` feeds `get_ir_document_content`. Returns `{filters, count, rows, note}` |
+
+Every filter is optional and filters are ANDed; unset filters are left out of the request body. `symbol` is a ticker (1-12 characters, A-Z 0-9 `.` `-`), `sector` one of the 11 sectors (Basic Materials … Utilities), `marketcap_type` one of Micro-cap / Small-cap / Medium-cap / Large-cap / Mega-cap, `country` a 2-letter ISO code, `sp_index` a boolean. An empty list is a valid answer (`note` explains it), not an error. Typical chain: `get_earnings_season_cohort` (e.g. small-cap healthcare misses) → `list_ir_documents_season` for those names → `get_ir_document_analysis` / `get_ir_document_content` on the decks. Both are synchronous and need auth (100/min per user, counts toward plan quota); 401, 422 and 429 come back as tool errors.
 
 ### Data feeds (`tools/data_feeds.py`)
 
