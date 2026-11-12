@@ -100,9 +100,17 @@ async def get_earnings_season_cohort(
     Returns {"filters", "count", "rows", "note"}. A row is {symbol, sector, sp_index,
     country, marketcap_type, date, eps_actual, eps_estimated, revenue_actual,
     revenue_estimated, beat_flag, eps_yoy_change, cohort}.
-    - beat_flag is "beat", "miss" or "in_line".
+    - beat_flag is judged on the legs (EPS, revenue) that have both an actual and an
+      estimate. "beat" = ANY such leg beat; "miss" = EVERY such leg missed; otherwise
+      "in_line". An EPS beat with a revenue miss is therefore a "beat", and a company with
+      only one leg reported is classified on that leg alone. Beat rates read off beat_flag
+      are generous; for a stricter count (e.g. both legs beat), compare eps_actual vs
+      eps_estimated and revenue_actual vs revenue_estimated directly in the returned rows,
+      treating null as not reported.
     - eps_yoy_change is a FRACTION, NOT a percent: 0.12 = +12%, -0.3 = -30%. Multiply by 100
-      before showing it as a %. Null when there is no prior-year actual.
+      before showing it as a %. Null when there is no prior-year actual. On a tiny or
+      near-zero prior-year base it can be very large (e.g. 70 = +7,000%), so prefer the
+      median over the mean when summarizing a group.
     - cohort is "sp500" (S&P 500 member), "beyond_sp500_us" (US, outside the S&P 500) or
       "other" (non-US).
 
