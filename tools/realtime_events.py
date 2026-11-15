@@ -412,10 +412,7 @@ async def get_company_event_web(
       {"tools": [{"tool": "company_financials", "arguments": {"symbol": "CSCO"},
                   "reason": "..."}, ...], "relation": ..., "cik": ...}
           -> call each tool with its `arguments` (fill obvious gaps such as symbol).
-             The `reason` says what that call should settle. A get_signed_sql_drilldown
-             entry carries a server-minted token: pass it verbatim, never edit it — it
-             returns the new record (e.g. actual vs consensus EPS) plus prior rows.
-             On 13F items `cik` and `filer` name the FILER, and the headline describes
+             The `reason` says what that call should settle. On 13F items `cik` and `filer` name the FILER, and the headline describes
              the filer's whole book, not just this name.
       {"tool": "explore_data_catalogue", "query": "...", "relation": ...}
           -> pass `query` verbatim as explore_data_catalogue's question.
@@ -429,8 +426,9 @@ async def get_company_event_web(
     with list_realtime_events(event_type=item.type, tickers=[symbol]), and
     get_event_ontology(event_type=item.type) says what that kind of event entails.
 
-    Need the edges between items (with their cause) or the ontology and table cards
-    in one call? Use `situate(symbols=[symbol])`; this tool returns the sequence only.
+    Need the edges between items (with their cause), signed drilldown links, or the
+    ontology and table cards in one call? Use `situate(symbols=[symbol])`; this tool
+    returns the sequence only.
 
     Traps:
       - `at` is a WRITE/PUBLISH time, not a business date: a call or period end can

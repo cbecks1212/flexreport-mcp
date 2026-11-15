@@ -105,8 +105,7 @@ class EventWebItem(BaseModel):
     tools_to_explore: Optional[dict[str, Any]] = Field(
         None,
         description="The follow-up call(s) for this item, ready to run: `tools` (a list of {tool, arguments?, "
-                    "reason?}, including get_signed_sql_drilldown with a server-minted token) or `tool` + `query` "
-                    "(an explore_data_catalogue request), plus `relation` (the table written) and `cik` on 13F "
+                    "reason?}) or `tool` + `query` (an explore_data_catalogue request), plus `relation` (the table written) and `cik` on 13F "
                     "items. Null when there is nothing to follow.",
     )
 
