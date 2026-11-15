@@ -99,7 +99,7 @@ Tools: `explore_data_catalogue` (transcripts, fundamentals, estimates), `trace_d
 
 ## Tools
 
-67 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
+73 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
 
 ### Situate & real-time events (`tools/realtime_events.py`)
 
@@ -194,6 +194,19 @@ Typical chain: `list_ir_documents` → `get_ir_document_analysis` → `get_ir_do
 
 Every filter is optional and filters are ANDed; unset filters are left out of the request body. `symbol` is a ticker (1-12 characters, A-Z 0-9 `.` `-`), `sector` one of the 11 sectors (Basic Materials … Utilities), `marketcap_type` one of Micro-cap / Small-cap / Medium-cap / Large-cap / Mega-cap, `country` a 2-letter ISO code, `sp_index` a boolean. An empty list is a valid answer (`note` explains it), not an error. Typical chain: `get_earnings_season_cohort` (e.g. small-cap healthcare misses) → `list_ir_documents_season` for those names → `get_ir_document_analysis` / `get_ir_document_content` on the decks. Both are synchronous and need auth (100/min per user, counts toward plan quota); 401, 422 and 429 come back as tool errors.
 
+### Earnings, estimates, analyst ratings & insiders (`tools/company_data_updates.py`)
+
+| Tool | Backend endpoint | What it does |
+|---|---|---|
+| `get_earnings_history(symbol, limit)` | `POST /earnings-history` | One company's **quarterly earnings reports**, newest first: `{symbol, date, status, timing, fiscal_year, fiscal_period, period_ending, eps_actual, eps_estimated, eps_surprise, revenue_actual, revenue_estimated, revenue_surprise, beat_flag, eps_yoy_change}`. `limit` 1-20, default 8 **reported** quarters; the next scheduled report (`status: upcoming`) is added on top. Surprises and `eps_yoy_change` are **fractions**; EPS is adjusted (street), not the GAAP EPS in `company_financials`. Returns `{symbol, limit, count, rows, note}` |
+| `get_analyst_estimates(symbol, limit)` | `POST /analyst-estimates` | One company's **quarterly consensus** (EPS / revenue avg-low-high, EBITDA, net income, analyst counts, consensus YoY growth as fractions), newest period first. `limit` 1-20, default 8, counted back from the furthest of the next 4 quarters (8 = next 4 + last 4 ended). Low/high are null when `est_range_is_modeled`; no revision history. Returns `{symbol, limit, count, rows, note}` |
+| `get_analyst_rating_actions(symbol, limit)` | `POST /analyst-rating-actions` | One company's **upgrades / downgrades / maintains**, newest first: `{date, rating_company, prev_rating, new_rating, action, news_title, publisher, news_url}`. `limit` 1-200, default 25. Ratings are in each firm's own words; `news_*` is null for most actions. Returns `{symbol, count, rows, note}` |
+| `get_analyst_rating_summary(symbol, limit)` | `POST /analyst-rating-summary` | **Where the analysts stand now**: `{symbol, consensus_rating, firm_count, analysis, firms, note}`. `limit` 1-100, default 25 firms, most recently active first; `firm_count` counts every firm active in the year up to the latest action, even when `limit` cuts the list. `analysis` can be months old, so its date is reported |
+| `get_insider_transactions(symbol, side, role, limit)` | `POST /insider-transactions` | One company's **Form 4 trades** by senior insiders over the last 6 months, newest first. `side` defaults to `BUY` + `SELL` (open market); `role` narrows to ceo / director / founder / ten_pct_owner (ANY of); `limit` 1-500, default 50. `mkt_value` is shares × close for every side. Rows carry ~1 KB of `footnotes` (CSCO default: 49 rows, 53 KB). Returns `{symbol, side, role, count, rows, note}` |
+| `get_insider_activity_summary(symbol, limit)` | `POST /insider-activity-summary` | One company's **insider activity rolled up** by quarter (`limit` 1-36, default 8) and by insider (last 6 months, largest net dollar value first). Buy / sell / net are open-market trades valued at the close; `net_buy_ratio` runs -1 to +1. Returns `{symbol, quarters, insiders, note}` |
+
+Until these endpoints, the same rows were reachable only through `explore_data_catalogue` or a signed drilldown link. Typical chains: `get_earnings_history` ↔ `get_analyst_estimates` ↔ `company_financials`; `get_analyst_rating_summary` → `get_analyst_rating_actions`; `get_insider_activity_summary` → `get_insider_transactions`. An unknown symbol returns empty results (never a 404), with `note` set; a bad symbol or enum value is a 422. All six are synchronous and need auth (100/min per user, counts toward plan quota); 401, 422 and 429 come back as tool errors.
+
 ### Data feeds (`tools/data_feeds.py`)
 
 | Tool | Backend endpoint | What it does |
@@ -270,6 +283,7 @@ tools/
   utility.py             get_task_status, list_options, list_sub_industries, onboard_symbol, billing
   market_data.py         technical indicators, intraday outliers, after-hours bars, earnings calendar + move prediction, market status
   institutional_ownership.py  13F position changes, ownership by manager type, portfolio allocation
+  company_data_updates.py     earnings history, analyst estimates, rating actions / summary, insider transactions / activity
   data_feeds.py          download_dataset (versioned daily feed files), user datasets (draft / save / list / delete)
   strategies.py          screen_stocks, portfolio optimization, stock picks, strategy track records
   scheduling.py          schedule / list / delete scheduled tasks
