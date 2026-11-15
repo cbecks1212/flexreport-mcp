@@ -398,7 +398,9 @@ async def get_company_event_web(
     pointers. When the two disagree, say so (a snapshot block can predate the window).
 
     Returns {"symbol": ..., "events": [...]}, newest first. Each item:
-      {"symbol", "at", "headline", "tools_to_explore"}
+      {"symbol", "at", "type", "headline", "tools_to_explore"}  (+ "filer" on 13F items)
+    `type` is the realtime event type ("8k_release", "company_update", "13f_new", ...),
+    null on data writes and session moves.
     Items are realtime events (company updates, rating actions, the earnings cycle:
     print, revision, 8-K, 10-Q/10-K, call, IR deck; 13F opens/exits/resizes; biggest
     mover/loser), measured session moves ("AVNW +5.7% (z +1.10) - company move"), and
@@ -410,8 +412,11 @@ async def get_company_event_web(
       {"tools": [{"tool": "company_financials", "arguments": {"symbol": "CSCO"},
                   "reason": "..."}, ...], "relation": ..., "cik": ...}
           -> call each tool with its `arguments` (fill obvious gaps such as symbol).
-             The `reason` says what that call should settle. On 13F items `cik` is the
-             FILER and the headline describes the filer's whole book, not just this name.
+             The `reason` says what that call should settle. A get_signed_sql_drilldown
+             entry carries a server-minted token: pass it verbatim, never edit it — it
+             returns the new record (e.g. actual vs consensus EPS) plus prior rows.
+             On 13F items `cik` and `filer` name the FILER, and the headline describes
+             the filer's whole book, not just this name.
       {"tool": "explore_data_catalogue", "query": "...", "relation": ...}
           -> pass `query` verbatim as explore_data_catalogue's question.
       {"relation": ...} alone or null -> nothing to follow; the headline is all there is.
@@ -420,12 +425,12 @@ async def get_company_event_web(
     -> print -> call -> rating action -> session move), then follow the
     `tools_to_explore` of the items that answer the user's question. Prefer those over
     guessing a tool. A headline is a pointer, never the content: fetch before quoting
-    figures. A realtime event inside the 12h cache can also be pulled in full with
-    list_realtime_events(event_type, tickers=[symbol]).
+    figures. Any item with a `type` can be pulled in full while inside the 12h cache
+    with list_realtime_events(event_type=item.type, tickers=[symbol]), and
+    get_event_ontology(event_type=item.type) says what that kind of event entails.
 
-    Need the typed graph — event `type`/`family` for get_event_ontology, edges with
-    their cause, signed drilldown links, ontology and table cards? Call
-    `situate(symbols=[symbol])`; this tool returns the flattened sequence only.
+    Need the edges between items (with their cause) or the ontology and table cards
+    in one call? Use `situate(symbols=[symbol])`; this tool returns the sequence only.
 
     Traps:
       - `at` is a WRITE/PUBLISH time, not a business date: a call or period end can
@@ -489,7 +494,7 @@ async def get_event_ontology(
       relation="eod_stock_prices"    one table/view and the event types that entail it
       family="earnings"              every event type and relation in a family
     No filter -> the whole class graph (21 event types, ~300 relations, 20 tools).
-    Web nodes from situate(symbols=[...]) carry the join keys verbatim: pass a node's
+    Event-web items (`type`) and situate web nodes carry the join keys verbatim: pass a node's
     `type` as event_type, its `relation` as relation, its `family` as family.
 
     An event_type card carries:
