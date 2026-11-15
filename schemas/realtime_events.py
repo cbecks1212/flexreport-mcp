@@ -88,40 +88,29 @@ class CompanySnapshotResult(_Block):
 
 
 # ── get_company_event_web ──────────────────────────────────────────────────
-class EventWebNode(BaseModel):
-    """Also carries `fetch` (the call returning the full payload) and `measure` when present."""
+class EventWebItem(BaseModel):
+    """One thing that happened to the company: an event, a measured session move, or a data write."""
 
     model_config = ConfigDict(extra="allow")
 
-    id: str = Field(description="Short node id (n1, n2, ...; m1... for market context).")
-    kind: Optional[str] = Field(None, description="event | data_update.")
+    symbol: Optional[str] = None
     at: Optional[str] = Field(None, description="Write/publish time — NOT the business date of the underlying event.")
-    headline: Optional[str] = None
-    type: Optional[str] = Field(None, description="Realtime event type (event nodes); join key for get_event_ontology.")
-    relation: Optional[str] = Field(None, description="Table written (data_update nodes).")
-    family: Optional[str] = None
-
-
-class EventWebEdge(BaseModel):
-    model_config = ConfigDict(extra="allow", populate_by_name=True)
-
-    from_: str = Field(alias="from", description="Earlier node id.")
-    to: str = Field(description="Later node id.")
-    via: Optional[str] = Field(None, description="Relation linking the two nodes.")
-    cause: Optional[str] = Field(None, description="same_chain_run (observed) | lineage (declared) | co_occurrence (temporal only).")
+    headline: Optional[str] = Field(None, description="One line; a pointer to the payload, not the payload.")
+    tools_to_explore: Optional[dict[str, Any]] = Field(
+        None,
+        description="The follow-up call(s) for this item, ready to run: `tools` (a list of {tool, arguments?, "
+                    "reason?}) or `tool` + `query` (an explore_data_catalogue request), plus `relation` (the "
+                    "table written) and `cik` on 13F items. Null when there is nothing to follow.",
+    )
 
 
 class CompanyEventWebResult(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     symbol: str
-    as_of: Optional[str] = None
-    window_days: Optional[int] = None
-    degraded: Optional[bool] = Field(None, description="True with empty lists when the graph has no rows for the symbol in the window.")
-    coverage_from: Optional[str] = Field(None, description="Earliest node in the whole graph; an older window cannot be answered.")
-    nodes: list[EventWebNode] = Field(description="Newest first.")
-    edges: list[EventWebEdge]
-    market_context: list[EventWebNode] = Field(default_factory=list, description="Market-wide macro / economic-calendar nodes.")
+    events: list[EventWebItem] = Field(
+        description="Newest first. Empty means no rows for the symbol in the window, not a quiet week."
+    )
 
 
 # ── get_event_ontology ─────────────────────────────────────────────────────
