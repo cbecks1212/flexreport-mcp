@@ -87,38 +87,6 @@ class CompanySnapshotResult(_Block):
     stock_grades_overview: Optional[SnapshotGrades] = None
 
 
-# ── get_company_event_web ──────────────────────────────────────────────────
-class EventWebItem(BaseModel):
-    """One thing that happened to the company: an event, a measured session move, or a data write."""
-
-    model_config = ConfigDict(extra="allow")
-
-    symbol: Optional[str] = None
-    at: Optional[str] = Field(None, description="Write/publish time — NOT the business date of the underlying event.")
-    type: Optional[str] = Field(
-        None,
-        description="Realtime event type (e.g. \"8k_release\", \"13f_new\"); null on data writes and session moves. "
-                    "Key for list_realtime_events(event_type=...) and get_event_ontology(event_type=...).",
-    )
-    headline: Optional[str] = Field(None, description="One line; a pointer to the payload, not the payload.")
-    filer: Optional[str] = Field(None, description="13F items: the filer's name and manager type (the cik is in tools_to_explore).")
-    tools_to_explore: Optional[dict[str, Any]] = Field(
-        None,
-        description="The follow-up call(s) for this item, ready to run: `tools` (a list of {tool, arguments?, "
-                    "reason?}) or `tool` + `query` (an explore_data_catalogue request), plus `relation` (the table written) and `cik` on 13F "
-                    "items. Null when there is nothing to follow.",
-    )
-
-
-class CompanyEventWebResult(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    symbol: str
-    events: list[EventWebItem] = Field(
-        description="Newest first. Empty means no rows for the symbol in the window, not a quiet week."
-    )
-
-
 # ── get_event_ontology ─────────────────────────────────────────────────────
 class EventOntologyResult(BaseModel):
     """Cards format fills event_types/relations/episodes (plus families, tools); triples fills edges."""
