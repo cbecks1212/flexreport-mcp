@@ -132,7 +132,7 @@ async def generate_report_for_stock(
     price-date field any more — do not send editorial steer; unknown keys are ignored.
 
     CHOOSING THE SHAPING FIELDS FROM THE ONTOLOGY (custom mode only — do not guess):
-    read get_company_event_web(ticker) for the latest node, then
+    read situate(symbols=[ticker]) for the latest web node, then
     get_event_ontology(event_type=node.type), and derive from the card's family and
     `informs`:
       earnings family          -> financial_items + estimate_items from the fundamentals

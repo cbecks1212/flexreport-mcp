@@ -172,7 +172,7 @@ async def situate(
     existing report" (get_latest_report), or a metric-history question with no event
     in it ("Micron EPS over 8 quarters" -> company_financials(symbol="MU", limit=8,
     line_items=["epsDiluted"]); cross-company or non-statement history ->
-    explore_data_catalogue). get_company_event_web gives a company's raw graph;
+    explore_data_catalogue). get_company_event_web gives a company's newest-first timeline;
     get_event_ontology gives any full card.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically).
@@ -377,130 +377,81 @@ async def get_company_event_web(
     ] = None,
     max_nodes: Annotated[
         Optional[int],
-        Field(description="Node cap (default 40, max 200).", ge=1, le=200),
+        Field(description="Cap on items read before filtering (default 40, max 200).", ge=1, le=200),
     ] = None,
 ) -> CompanyEventWebResult:
-    """Fetch the connected WEB of what recently HAPPENED to a company — the WHY behind its snapshot, and a time-ordered graph to CHAIN your next calls off.
+    """Fetch what recently HAPPENED to a company, newest first — the WHY behind its snapshot, with the next call for each item.
 
-    ===> `situate(symbols=[symbol])` already returns this web deduped to the newest
-    node per event type and per table, PLUS the ontology cards and the table cards
-    with read_by — start there. Call this tool directly for the RAW graph (every
-    node, no dedup) or a different `window_days`, and pair every node you chain off
-    with get_event_ontology(event_type=node.type): the web says WHICH event, the
-    ontology says what it entails and what to do about it.
+    ===> A FIRST-LINE TOOL FOR SINGLE-COMPANY QUESTIONS. Reach for it whenever the
+    user asks what has been going on with a name ("catch me up on WM", "what happened
+    at NVDA this week", "anything I should know before earnings?"), asks WHY the
+    company looks the way it does ("why is the thesis negative?", "what drove the
+    downgrade?"), or before aiming explore_data_catalogue, generate_report_for_stock
+    or list_realtime_events at ONE symbol. Synchronous and cheap.
 
-    ===> A FIRST-LINE TOOL FOR SINGLE-COMPANY QUESTIONS, not a specialist one. Reach
-    for it whenever the user asks what has been going on with a name ("catch me up on
-    WM", "what happened at NVDA this week", "anything I should know before
-    earnings?"), asks WHY the company looks the way it does ("why is the thesis
-    negative?", "what drove the downgrade?", "what changed?"), or whenever you are
-    about to aim a targeted `explore_data_catalogue`, `generate_report_for_stock`, or
-    `list_realtime_events` request at ONE symbol. Synchronous and cheap —
-    one call turns "I'll guess which event types and dates matter" into "here are
-    the exact events, their timestamps, the tables that were written, and the call
-    that returns each full payload".
+    *** THE STANDARD PAIR: `get_company_snapshot` + THIS. ***
+      - `get_company_snapshot(symbol)` -> the WHAT: where the company stands now.
+      - `get_company_event_web(symbol)` -> the WHY: the earnings print, the 8-K, the
+        call, the rating action, the 13F moves, the session moves — in order.
+    Quote the snapshot for the current position and this for the sequence that
+    explains it. Do NOT use this to state current values: it carries headlines and
+    pointers. When the two disagree, say so (a snapshot block can predate the window).
 
-    *** THE STANDARD PAIR: `get_company_snapshot` + THIS. *** They answer the two
-    halves of almost every company question and are usually called TOGETHER:
-      - `get_company_snapshot(symbol)` -> the WHAT. Where the company stands now:
-        thesis, fundamentals, technicals, ownership, grades. A settled position with
-        no account of how it got there.
-      - `get_company_event_web(symbol)` -> the WHY. The episode behind that position:
-        the earnings print, the 8-K, the transcript update, the rating action, the
-        13F refresh — in order, with edges saying how each relates.
-    Read them together: the snapshot for the current position, the web for the
-    sequence that explains it. A snapshot delivered alone reads as a verdict with no
-    evidence; this tool is the evidence. Conversely, do NOT use this tool to state
-    the company's current position — it carries headlines and pointers, not values.
-    When the two disagree, say so plainly rather than smoothing it over: the blocks
-    in a snapshot carry independent as-of dates, so an ownership or grade block can
-    predate anything in the window (widen `window_days` before concluding a snapshot
-    move is unexplained).
+    Returns {"symbol": ..., "events": [...]}, newest first. Each item:
+      {"symbol", "at", "type", "headline", "tools_to_explore"}  (+ "filer" on 13F items)
+    `type` is the realtime event type ("8k_release", "company_update", "13f_new", ...),
+    null on data writes and session moves.
+    Items are realtime events (company updates, rating actions, the earnings cycle:
+    print, revision, 8-K, 10-Q/10-K, call, IR deck; 13F opens/exits/resizes; biggest
+    mover/loser), measured session moves ("AVNW +5.7% (z +1.10) - company move"), and
+    data writes worth reading (significant news, earnings data landing, insider
+    filings, 13F analysis, Companies House filings, IPO entries). Routine rescoring
+    writes are left out.
 
-    Returns:
-      {"symbol": ..., "as_of": ISO8601, "window_days": N,
-       "nodes": [...], "edges": [...], "market_context": [...]}
+    `tools_to_explore` is the next step, ready to call:
+      {"tools": [{"tool": "company_financials", "arguments": {"symbol": "CSCO"},
+                  "reason": "..."}, ...], "relation": ..., "cik": ...}
+          -> call each tool with its `arguments` (fill obvious gaps such as symbol).
+             The `reason` says what that call should settle. On 13F items `cik` and `filer` name the FILER, and the headline describes
+             the filer's whole book, not just this name.
+      {"tool": "explore_data_catalogue", "query": "...", "relation": ...}
+          -> pass `query` verbatim as explore_data_catalogue's question.
+      {"relation": ...} alone or null -> nothing to follow; the headline is all there is.
 
-    NODES — two kinds, newest first, each with a short id ("n1", "n2", ...):
-      - kind="event"       — a published realtime event. Carries `type` (the event
-                             type, e.g. "8k_release"), `family`, and a `fetch` hint
-                             — the exact call that returns its FULL payload, e.g.
-                             {"tool": "list_realtime_events", "event_type": "8k_release",
-                              "related_endpoints": [...]}.
-      - kind="data_update" — a write to a backing table for activity that publishes
-                             NO event at all (insider filings, 13F refreshes, IPO
-                             calendar entries, Companies House events, transcript and
-                             fundamentals analysis). Carries `relation` (the table
-                             written); most also carry a `fetch` hint (a ready-made
-                             `explore_data_catalogue` query for the underlying rows),
-                             and on some relations the hint additionally carries
-                             `signed_query_url` — see step 2 below.
-    Every node carries `at` (when the write/publish happened) and `headline` (ONE
-    line, truncated at 200 chars).
+    HOW TO CHAIN (the point of this tool): read the sequence as an episode (e.g. 8-K
+    -> print -> call -> rating action -> session move), then follow the
+    `tools_to_explore` of the items that answer the user's question. Prefer those over
+    guessing a tool. A headline is a pointer, never the content: fetch before quoting
+    figures. Any item with a `type` can be pulled in full while inside the 12h cache
+    with list_realtime_events(event_type=item.type, tickers=[symbol]), and
+    get_event_ontology(event_type=item.type) says what that kind of event entails.
 
-    EDGES — {"from": "n3", "to": "n1", "via": <relation>, "cause": ...}, pointing
-    from the EARLIER node to the LATER one. `cause` is a confidence grade — respect it:
-      - "same_chain_run" — OBSERVED. One backend chain run produced both nodes.
-      - "lineage"        — DECLARED. One wrote the table the other's event derives from.
-      - "co_occurrence"  — TEMPORAL ONLY. Same company, same window, no known causal
-                           path. Report these as "happened alongside", NEVER as caused-by.
-
-    HOW TO CHAIN (the point of this tool):
-      1. Walk the edges back from the newest node to reconstruct the episode, then
-         follow each event node's `fetch` to get the detail — e.g.
-         `list_realtime_events(event_type="8k_release", tickers=["WM"])`. Always narrow
-         by `tickers=[symbol]`; an unfiltered call re-pulls the entire cache.
-      2. When a `data_update` node's `fetch` carries `signed_query_url`, call
-         `get_signed_sql_drilldown` with it FIRST — zero planning, and it returns the
-         new record (`is_new_record: true`) plus the context rows to read it against.
-         If it comes back not-authenticated, the link is fine — the user's sign-in
-         lapsed; say so rather than altering the token.
-         Otherwise use the node's `fetch` query if it has one, or its `relation` and
-         `at` to write a PRECISE `explore_data_catalogue` query ("insider filings for
-         WM since 2026-08-09", "13F position changes for WM in the last week")
-         instead of a vague one.
-      3. Feed the concrete events and dates into `explore_data_catalogue` /
-         `generate_research_report` so the analysis is scoped to what actually
-         happened; for the company's own report, `get_latest_report` returns the
-         document written from that event.
-      4. Nothing here is a full payload — a headline is a pointer, never the content.
-         Do not quote a headline as if it were the event.
-
-    `window_days` and `max_nodes` widen the look-back. Beyond the node cap, edges are capped per node (~3 same_chain_run, ~3
-    co_occurrence) and `market_context` — market-wide macro/economic-calendar nodes
-    that carry no ticker and so attach to no symbol — is capped at 5. A MISSING edge
-    is therefore not evidence that two things are unrelated.
+    Need the edges between items (with their cause), signed drilldown links, or the
+    ontology and table cards in one call? Use `situate(symbols=[symbol])`; this tool
+    returns the sequence only.
 
     Traps:
-      - `at` is a WRITE/PUBLISH time, not a business date. An earnings call date or
-        fiscal period end can be well before the node's timestamp — never report `at`
-        as the date the underlying event occurred.
-      - A "<table> refreshed for N symbols" node is universe-wide scheduled
-        maintenance rolled up, not company-specific signal.
-      - An empty web (`"degraded": true`, empty lists) means the graph has no rows for
-        that symbol in the window — NOT that nothing happened and NOT that the symbol
-        is uncovered. Say so, and fall back to `list_realtime_events` /
-        `explore_data_catalogue` rather than concluding it was a quiet week.
+      - `at` is a WRITE/PUBLISH time, not a business date: a call or period end can
+        be well before it. Never report `at` as when the underlying event occurred.
+      - Insider-filing headlines ("1206 new insider filing(s)") repeat the same count
+        on each write; it is not the number of new filings since the last item.
+      - An empty `events` list means the graph has no rows for the symbol in the
+        window, NOT a quiet week and NOT an uncovered symbol. Widen `window_days`,
+        or fall back to list_realtime_events / explore_data_catalogue.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     Rate-limited 60/min.
-
-    Every node's `type`, `relation` and `family` are join keys into get_event_ontology:
-    call get_event_ontology(event_type=node.type) to learn what that node ENTAILS (the
-    tables now fresh, the events that should follow and how soon, where the payload
-    lives after the 12h cache, whether downstream tables have refreshed yet) before
-    chaining further calls off it. Web = what happened to THIS company; ontology = what
-    that KIND of thing means. Read them together.
     """
     params: dict[str, Any] = {"symbol": symbol}
     if window_days:
         params["window_days"] = window_days
     if max_nodes:
         params["max_nodes"] = max_nodes
-    return _ok(await _send(
+    events = _ok(await _send(
         ctx, "GET", "/get-company-event-web",
         params=params,
     ))
+    return CompanyEventWebResult(symbol=symbol.strip().upper(), events=events if isinstance(events, list) else [])
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Event Ontology", readOnlyHint=True))
@@ -541,7 +492,7 @@ async def get_event_ontology(
       relation="eod_stock_prices"    one table/view and the event types that entail it
       family="earnings"              every event type and relation in a family
     No filter -> the whole class graph (21 event types, ~300 relations, 20 tools).
-    Web nodes from get_company_event_web carry the join keys verbatim: pass a node's
+    Event-web items (`type`) and situate web nodes carry the join keys verbatim: pass a node's
     `type` as event_type, its `relation` as relation, its `family` as family.
 
     An event_type card carries:

@@ -359,7 +359,7 @@ async def get_signed_sql_drilldown(
     ctx: Context,
     encrypted_query_token: Annotated[
         str,
-        Field(description="A node's `signed_query_url` from get_company_event_web, or just its `t` "
+        Field(description="A situate web node's `signed_query_url`, or just its `t` "
                           "parameter — verbatim. Never construct or edit one; never pass SQL."),
     ],
     prompt: Annotated[
@@ -382,7 +382,7 @@ async def get_signed_sql_drilldown(
 ) -> QueryRowsResult:
     """Fetch the rows behind an event-web drilldown from its server-minted query token.
 
-    Some `get_company_event_web` nodes carry `signed_query_url` in their `fetch` hint —
+    Some web nodes from `situate(symbols=[...])` carry `signed_query_url` in their `fetch` hint —
     an opaque, tamper-proof link the backend minted for exactly that node. This tool is
     the zero-planning rung of the chain: no query to compose, the rows come back
     directly. Pass either the full `signed_query_url` or just its `t` parameter; the
@@ -408,7 +408,7 @@ async def get_signed_sql_drilldown(
     the exact speaker turn a transcript citation points at.
 
     HTTP 403 means the token is invalid or tampered — do not retry with an altered
-    token; re-fetch the event web for a fresh link instead.
+    token; re-run situate for a fresh link instead.
 
     `values` and `prompt` re-aim a token that is a PLACEHOLDER TWIN at other entities;
     the response then carries `parameters` (what was substituted) alongside `rows`;
@@ -865,7 +865,7 @@ async def run_saved_query(
     and it does not draw on the 20/hour exploration budget.
 
     A full signed URL is accepted in `query_tokens` and unwrapped. For a token
-    that came from a `get_company_event_web` node rather than a saved row, use
+    that came from a situate web node rather than a saved row, use
     `get_signed_sql_drilldown` — same endpoint, single node, drilldown framing.
 
     `values` slots are substituted deterministically, with no language model in the
