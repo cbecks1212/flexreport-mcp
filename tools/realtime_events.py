@@ -1,4 +1,4 @@
-"""Real-time event tools: situate, the 12h event cache, company snapshot/event web, event ontology."""
+"""Real-time event tools: situate, the 12h event cache, company snapshot, event ontology."""
 
 import asyncio
 from typing import Annotated, Any, Literal, Optional
@@ -10,7 +10,6 @@ from pydantic import Field
 
 from core import mcp, _send, _ok, compact_output
 from schemas.realtime_events import (
-    CompanyEventWebResult,
     CompanySnapshotResult,
     EventOntologyResult,
     RealtimeEventsResult,
@@ -172,8 +171,7 @@ async def situate(
     existing report" (get_latest_report), or a metric-history question with no event
     in it ("Micron EPS over 8 quarters" -> company_financials(symbol="MU", limit=8,
     line_items=["epsDiluted"]); cross-company or non-statement history ->
-    explore_data_catalogue). get_company_event_web gives a company's newest-first timeline;
-    get_event_ontology gives any full card.
+    explore_data_catalogue). get_event_ontology gives any full card.
 
     Requires auth (your MCP client attaches the OAuth bearer automatically).
     """
@@ -341,19 +339,17 @@ async def get_company_snapshot(
     available" enumerations to `list_options` (instant), and "do you have data
     on <topic>" questions that need actual data to `explore_data_catalogue`.
 
-    *** RUN IT WITH `get_company_event_web(symbol)` — THE STANDARD PAIR. *** This
-    tool gives the WHAT (where the company stands); the event web gives the WHY
-    (the events that got it there, in order, and how they connect). The snapshot
-    states that the thesis shifted, the valuation signal changed, or ownership
-    moved; it does NOT say what caused any of it — every block here is a settled
-    output with the episode behind it stripped out. So whenever the user asks
-    about a company generally, or follows a snapshot with "why?" / "what changed?"
-    / "what drove that?", call BOTH and read them together: quote the snapshot for
-    the current position, and the event web for the sequence that explains it.
-    Presenting a snapshot alone as the whole picture is the failure mode — it
-    reads as a verdict with no evidence.
+    *** RUN IT AFTER `situate(symbols=[symbol])`. *** This tool gives the WHAT
+    (where the company stands); situate's event web gives the WHY (the events that
+    got it there, in order, and how they connect). The snapshot states that the
+    thesis shifted, the valuation signal changed, or ownership moved; it does NOT
+    say what caused any of it. So whenever the user asks about a company generally,
+    or follows a snapshot with "why?" / "what changed?", read both together: quote
+    the snapshot for the current position, and situate's web for the sequence that
+    explains it. Presenting a snapshot alone as the whole picture is the failure
+    mode — it reads as a verdict with no evidence.
 
-    Two honest limits when pairing them. (1) The event web defaults to a 7-day
+    Two honest limits when pairing them. (1) situate's web defaults to a 14-day
     window; a driver older than that needs `window_days` widened (up to 90) before
     you can say the snapshot is unexplained. (2) The blocks here carry their own
     as-of dates — a 13F ownership block can be a quarter old, so the event that
@@ -364,94 +360,6 @@ async def get_company_snapshot(
         ctx, "GET", "/get-company-snapshot",
         params={"symbol": symbol}, require_auth=False,
     ))
-
-
-@mcp.tool(annotations=ToolAnnotations(title="Get Company Event Web", readOnlyHint=True))
-async def get_company_event_web(
-    ctx: Context,
-    symbol: Annotated[str, Field(description="Covered ticker, e.g. \"WM\".")],
-    window_days: Annotated[
-        Optional[int],
-        Field(description="Look-back in days (default 7, max 90). Widen before calling a snapshot move unexplained.",
-              ge=1, le=90),
-    ] = None,
-    max_nodes: Annotated[
-        Optional[int],
-        Field(description="Cap on items read before filtering (default 40, max 200).", ge=1, le=200),
-    ] = None,
-) -> CompanyEventWebResult:
-    """Fetch what recently HAPPENED to a company, newest first — the WHY behind its snapshot, with the next call for each item.
-
-    ===> A FIRST-LINE TOOL FOR SINGLE-COMPANY QUESTIONS. Reach for it whenever the
-    user asks what has been going on with a name ("catch me up on WM", "what happened
-    at NVDA this week", "anything I should know before earnings?"), asks WHY the
-    company looks the way it does ("why is the thesis negative?", "what drove the
-    downgrade?"), or before aiming explore_data_catalogue, generate_report_for_stock
-    or list_realtime_events at ONE symbol. Synchronous and cheap.
-
-    *** THE STANDARD PAIR: `get_company_snapshot` + THIS. ***
-      - `get_company_snapshot(symbol)` -> the WHAT: where the company stands now.
-      - `get_company_event_web(symbol)` -> the WHY: the earnings print, the 8-K, the
-        call, the rating action, the 13F moves, the session moves — in order.
-    Quote the snapshot for the current position and this for the sequence that
-    explains it. Do NOT use this to state current values: it carries headlines and
-    pointers. When the two disagree, say so (a snapshot block can predate the window).
-
-    Returns {"symbol": ..., "events": [...]}, newest first. Each item:
-      {"symbol", "at", "type", "headline", "tools_to_explore"}  (+ "filer" on 13F items)
-    `type` is the realtime event type ("8k_release", "company_update", "13f_new", ...),
-    null on data writes and session moves.
-    Items are realtime events (company updates, rating actions, the earnings cycle:
-    print, revision, 8-K, 10-Q/10-K, call, IR deck; 13F opens/exits/resizes; biggest
-    mover/loser), measured session moves ("AVNW +5.7% (z +1.10) - company move"), and
-    data writes worth reading (significant news, earnings data landing, insider
-    filings, 13F analysis, Companies House filings, IPO entries). Routine rescoring
-    writes are left out.
-
-    `tools_to_explore` is the next step, ready to call:
-      {"tools": [{"tool": "company_financials", "arguments": {"symbol": "CSCO"},
-                  "reason": "..."}, ...], "relation": ..., "cik": ...}
-          -> call each tool with its `arguments` (fill obvious gaps such as symbol).
-             The `reason` says what that call should settle. On 13F items `cik` and `filer` name the FILER, and the headline describes
-             the filer's whole book, not just this name.
-      {"tool": "explore_data_catalogue", "query": "...", "relation": ...}
-          -> pass `query` verbatim as explore_data_catalogue's question.
-      {"relation": ...} alone or null -> nothing to follow; the headline is all there is.
-
-    HOW TO CHAIN (the point of this tool): read the sequence as an episode (e.g. 8-K
-    -> print -> call -> rating action -> session move), then follow the
-    `tools_to_explore` of the items that answer the user's question. Prefer those over
-    guessing a tool. A headline is a pointer, never the content: fetch before quoting
-    figures. Any item with a `type` can be pulled in full while inside the 12h cache
-    with list_realtime_events(event_type=item.type, tickers=[symbol]), and
-    get_event_ontology(event_type=item.type) says what that kind of event entails.
-
-    Need the edges between items (with their cause), signed drilldown links, or the
-    ontology and table cards in one call? Use `situate(symbols=[symbol])`; this tool
-    returns the sequence only.
-
-    Traps:
-      - `at` is a WRITE/PUBLISH time, not a business date: a call or period end can
-        be well before it. Never report `at` as when the underlying event occurred.
-      - Insider-filing headlines ("1206 new insider filing(s)") repeat the same count
-        on each write; it is not the number of new filings since the last item.
-      - An empty `events` list means the graph has no rows for the symbol in the
-        window, NOT a quiet week and NOT an uncovered symbol. Widen `window_days`,
-        or fall back to list_realtime_events / explore_data_catalogue.
-
-    Requires auth (your MCP client attaches the OAuth bearer automatically).
-    Rate-limited 60/min.
-    """
-    params: dict[str, Any] = {"symbol": symbol}
-    if window_days:
-        params["window_days"] = window_days
-    if max_nodes:
-        params["max_nodes"] = max_nodes
-    events = _ok(await _send(
-        ctx, "GET", "/get-company-event-web",
-        params=params,
-    ))
-    return CompanyEventWebResult(symbol=symbol.strip().upper(), events=events if isinstance(events, list) else [])
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Event Ontology", readOnlyHint=True))
