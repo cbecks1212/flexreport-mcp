@@ -193,6 +193,15 @@ Typical chain: `list_ir_documents` → `get_ir_document_analysis` → `get_ir_do
 
 Every filter is optional and filters are ANDed; unset filters are left out of the request body. `symbol` is a ticker (1-12 characters, A-Z 0-9 `.` `-`), `sector` one of the 11 sectors (Basic Materials … Utilities), `marketcap_type` one of Micro-cap / Small-cap / Medium-cap / Large-cap / Mega-cap, `country` a 2-letter ISO code, `sp_index` a boolean. An empty list is a valid answer (`note` explains it), not an error. Typical chain: `get_earnings_season_cohort` (e.g. small-cap healthcare misses) → `list_ir_documents_season` for those names → `get_ir_document_analysis` / `get_ir_document_content` on the decks. Both are synchronous and need auth (100/min per user, counts toward plan quota); 401, 422 and 429 come back as tool errors.
 
+### Sector performance (`tools/sector_performance.py`)
+
+| Tool | Backend endpoint | What it does |
+|---|---|---|
+| `get_sector_price_performance(sectors, sp_index)` | `POST /sector-price-performance` | **Price returns by sector**, one row per sector: `{sector, universe, as_of, n_symbols, median_return_*, mcap_weighted_return_*}` for `1d`, `1w`, `1m`, `3m`, `6m`, `12m`, `ytd`. Returns are in **percent** (1.25 = +1.25%), unlike the fractions in the earnings tools. `sp_index` true = S&P 500 members, false = companies outside the S&P 500, omitted = all. Returns `{filters, count, rows, note}` |
+| `get_sector_volume_performance(sectors, marketcap_types, limit)` | `POST /sector-volume-performance` | **Share volume by sector and market-cap bucket** for US listings, one row per `(date, sector, marketcap_type)`: `one_week`, `one_month`, `three_months`, `six_months`, `one_year`, plus `*_pct`, the **percent** change against the window just before it of the same length. `limit` 1-252, default 1, counts the most recent **dates**, not rows. Returns `{filters, count, rows, note}` |
+
+Every filter is optional. `sectors` is a list of the 11 sector names and `marketcap_types` a list of Micro-cap / Small-cap / Medium-cap / Large-cap / Mega-cap; omitting a filter covers all values, and unset filters are left out of the request body. An empty list is a valid answer (`note` explains it), not an error. Both tools are synchronous and need auth (counts toward plan quota); 401, 422 and 429 come back as tool errors.
+
 ### Earnings, estimates, analyst ratings & insiders (`tools/company_data_updates.py`)
 
 | Tool | Backend endpoint | What it does |
@@ -282,6 +291,7 @@ tools/
   utility.py             get_task_status, list_options, list_sub_industries, onboard_symbol, billing
   market_data.py         technical indicators, intraday outliers, after-hours bars, earnings calendar + move prediction, market status
   institutional_ownership.py  13F position changes, ownership by manager type, portfolio allocation
+  sector_performance.py       sector price returns (median / market-cap-weighted), sector share volume by market-cap bucket
   company_data_updates.py     earnings history, analyst estimates, rating actions / summary, insider transactions / activity
   data_feeds.py          download_dataset (versioned daily feed files), user datasets (draft / save / list / delete)
   strategies.py          screen_stocks, portfolio optimization, stock picks, strategy track records
