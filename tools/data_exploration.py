@@ -12,9 +12,11 @@ from pydantic import Field
 from core import mcp, _send, _ok
 from schemas.data_exploration import (
     CompanyFinancialsResult,
+    CompanyS1Result,
     DeleteSavedQueryResult,
     DocumentSectionResult,
     QueryRowsResult,
+    S1SectionsResult,
     SavedQueriesResult,
     SavedQueryReplayResult,
     SaveQueryResult,
@@ -126,6 +128,106 @@ async def company_financials(
                 "filing for it yet" + (", or the line_items names do not match this table's" if items else "") + ".")
     return CompanyFinancialsResult(symbol=body["symbol"], financial_type=financial_type, count=len(rows), rows=rows,
                                    note=note)
+
+
+S1TableName = Literal["s1_significant_passages", "s1_raw_tables"]
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Get Company S-1 Passages And Tables", readOnlyHint=True))
+async def company_s1(
+    ctx: Context,
+    symbol: Annotated[str, Field(description="Ticker of the S-1 filer, e.g. \"ANT\".")],
+    table_names: Annotated[
+        Optional[list[S1TableName]],
+        Field(description="What to read (default [\"s1_significant_passages\"]): s1_significant_passages = the key "
+                          "passages, verbatim, with why each matters; s1_raw_tables = the filing's tables as text."),
+    ] = None,
+    limit: Annotated[
+        int,
+        Field(description="Most recent S-1 / S-1/A filings to read (1-5, default 1). 1 is the latest filing; raise "
+                          "it only to compare an amendment with the original.", ge=1, le=5),
+    ] = 1,
+    sections: Annotated[
+        Optional[list[str]],
+        Field(description="Only passages in these sections (case-insensitive), named exactly as list_s1_sections "
+                          "returns them, e.g. [\"Risk Factors\"]. Filters s1_significant_passages only."),
+    ] = None,
+) -> CompanyS1Result:
+    """A company's S-1 registration statement (IPO prospectus) read directly — its key passages, verbatim, and its tables. The targeted tool for "what does X's S-1 say about ...", risk factors, use of proceeds, dilution, the business and its numbers before listing.
+
+    ===> CALL list_s1_sections(symbol) FIRST and pass `sections`. An unfiltered passages
+    read of one filing runs to about 390 KB — more than most contexts take in one
+    result. list_s1_sections is small: each section that holds key passages, its pages,
+    and how many passages it holds. Pick the sections the question needs, then call
+    this with sections=[...]. Read s1_raw_tables only when the question needs a table's
+    numbers, and keep limit=1 unless comparing filings.
+
+    `situate` web nodes for an S-1 carry a fetch hint that calls this tool with
+    {symbol, table_names, limit}; add `sections` to it rather than running it bare.
+
+    Returns {"symbol", "s1_significant_passages": [...], "s1_raw_tables": [...]}.
+      passage rows  passage_id, section, anchor, page_number, type, passage (VERBATIM
+                    filing text — quote it as is), why_significant (a model's note on
+                    why it matters: attribute it to the analysis, never to the filing)
+      table rows    page_number, table_number, table_context, table_text
+    Every row carries accession_no, form ("S-1" or "S-1/A"), filing_date and source_url
+    (the filing on sec.gov): cite the filing with them. With limit > 1 the rows of
+    several filings arrive together; tell them apart by accession_no / filing_date.
+
+    Errors: a 404 means no S-1 is stored for the symbol; a 422 a bad argument.
+    Requires auth (your MCP client attaches the OAuth bearer automatically).
+    """
+    symbol = symbol.strip().upper()
+    tables = list(dict.fromkeys(table_names or ["s1_significant_passages"]))
+    body: dict[str, Any] = {"symbol": symbol, "table_names": tables, "limit": limit}
+    wanted = [s.strip() for s in sections or [] if s and s.strip()]
+    if wanted:
+        if "s1_significant_passages" not in tables:
+            raise ToolError("`sections` filters s1_significant_passages only — add it to table_names or omit sections.")
+        body["sections"] = wanted
+    resp = _ok(await _send(ctx, "POST", "/company-s1", json=body))
+    if not isinstance(resp, dict):
+        raise ToolError(f"Unexpected /company-s1 response: {str(resp)[:500]}")
+    passages = resp.get("s1_significant_passages") or []
+    raw_tables = resp.get("s1_raw_tables") or []
+    note = None
+    if not passages and not raw_tables:
+        note = (f"An S-1 is stored for {symbol}, but nothing came back for {', '.join(tables)}"
+                + (" in those sections — check the names against list_s1_sections" if wanted else "") + ".")
+    return CompanyS1Result(**{**resp, "symbol": resp.get("symbol") or symbol,
+                              "s1_significant_passages": passages, "s1_raw_tables": raw_tables, "note": note})
+
+
+@mcp.tool(annotations=ToolAnnotations(title="List S-1 Sections", readOnlyHint=True))
+async def list_s1_sections(
+    ctx: Context,
+    symbol: Annotated[str, Field(description="Ticker of the S-1 filer, e.g. \"ANT\".")],
+) -> S1SectionsResult:
+    """The sections of a company's latest S-1 that hold key passages, in document order — the table of contents to read before company_s1.
+
+    ===> Call this BEFORE company_s1 and pass the section names you need as
+    company_s1(symbol, sections=[...]). A full passages read runs to about 390 KB;
+    this is a few KB.
+
+    Returns {"symbol", "count", "sections": [{section, start_page, end_page, passages,
+    accession_no, form, filing_date}]}. `passages` counts the key passages in the
+    section, so it also says how large a sections-filtered read will be. Only the
+    LATEST S-1 / S-1/A is listed; accession_no / form / filing_date say which one.
+
+    Errors: a 404 means no S-1 is stored for the symbol. Public, no auth.
+    """
+    symbol = symbol.strip().upper()
+    resp = _ok(await _send(ctx, "GET", "/list-s1-sections", params={"ticker": symbol}, require_auth=False))
+    if isinstance(resp, dict) and isinstance(resp.get("sections"), list):
+        rows, extra = resp["sections"], {k: v for k, v in resp.items() if k not in ("sections", "count", "note")}
+    elif isinstance(resp, list):
+        rows, extra = resp, {}
+    else:
+        raise ToolError(f"Unexpected /list-s1-sections response: {str(resp)[:500]}")
+    note = (f"No S-1 sections with key passages for {symbol}: its latest S-1 has none extracted yet. "
+            "company_s1(symbol, table_names=[\"s1_raw_tables\"]) may still have its tables.") if not rows else None
+    return S1SectionsResult(**{**extra, "symbol": extra.get("symbol") or symbol, "count": len(rows),
+                               "sections": rows, "note": note})
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Explore Data Catalogue", readOnlyHint=False, destructiveHint=False))
