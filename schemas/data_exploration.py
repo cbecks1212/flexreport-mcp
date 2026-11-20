@@ -87,6 +87,71 @@ class CompanyFinancialsResult(BaseModel):
     note: Optional[str] = Field(None, description="Set only when no rows came back: what an empty result can mean.")
 
 
+class S1Passage(BaseModel):
+    """One key passage of an S-1 / S-1/A."""
+
+    model_config = ConfigDict(extra="allow")
+
+    passage_id: Optional[Any] = None
+    section: Optional[str] = Field(None, description="Section the passage sits in, as named by list_s1_sections.")
+    anchor: Optional[str] = None
+    page_number: Optional[Any] = None
+    type: Optional[str] = None
+    passage: Optional[str] = Field(None, description="Verbatim text from the filing; quote it as is.")
+    why_significant: Optional[str] = Field(None, description="A model's note on why the passage matters, not filing text.")
+    accession_no: Optional[str] = None
+    form: Optional[str] = Field(None, description="\"S-1\" or \"S-1/A\".")
+    filing_date: Optional[str] = None
+    source_url: Optional[str] = Field(None, description="The filing on sec.gov; cite it with the passage.")
+
+
+class S1Table(BaseModel):
+    """One table extracted from an S-1 / S-1/A."""
+
+    model_config = ConfigDict(extra="allow")
+
+    page_number: Optional[Any] = None
+    table_number: Optional[Any] = None
+    table_context: Optional[str] = Field(None, description="Text around the table: what it shows.")
+    table_text: Optional[str] = None
+    accession_no: Optional[str] = None
+    form: Optional[str] = None
+    filing_date: Optional[str] = None
+    source_url: Optional[str] = None
+
+
+class CompanyS1Result(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    symbol: str
+    s1_significant_passages: list[S1Passage] = Field(
+        default_factory=list, description="Key passages, one row each; empty when not requested or filtered out."
+    )
+    s1_raw_tables: list[S1Table] = Field(default_factory=list, description="Tables, one row each; empty when not requested.")
+    note: Optional[str] = Field(None, description="Set only when nothing came back: what an empty result can mean.")
+
+
+class S1Section(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    section: Optional[str] = Field(None, description="Pass to company_s1(sections=[...]).")
+    start_page: Optional[Any] = None
+    end_page: Optional[Any] = None
+    passages: Optional[int] = Field(None, description="Key passages in this section.")
+    accession_no: Optional[str] = None
+    form: Optional[str] = None
+    filing_date: Optional[str] = None
+
+
+class S1SectionsResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    symbol: str
+    count: int = Field(description="Sections returned.")
+    sections: list[S1Section] = Field(description="Sections of the latest S-1 that hold key passages, in document order.")
+    note: Optional[str] = Field(None, description="Set only when no sections came back.")
+
+
 class TraceSourcesResult(BaseModel):
     """Polymorphic by relation: documents, citations (finest), or a cohort."""
 

@@ -99,7 +99,7 @@ Tools: `explore_data_catalogue` (transcripts, fundamentals, estimates), `trace_d
 
 ## Tools
 
-73 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
+78 tools, grouped by the module that registers them. Clients see them in `tools/__init__.py` import order (situate first).
 
 ### Situate & real-time events (`tools/realtime_events.py`)
 
@@ -141,6 +141,8 @@ Default delivery for a live-streaming ask is a dashboard (in Claude, an Artifact
 | Tool | Backend endpoint | What it does |
 |---|---|---|
 | `company_financials(symbol, financial_type, limit, line_items)` | `POST /company-financials` | **One company's EDGAR statements, read directly** — standardized quarterly/annual (`edgar_quarterly_financials` default), as filed (`edgar_10q_financials` / `edgar_10k_financials`, XBRL concepts with accession + filing_url), 8-K tables (`edgar_eight_k`) or YoY change (`edgar_financials_yoy_change_m`, stale until the post-transcript / 19:00 ET refresh). `limit` 1-12, default 5 (includes the year-ago quarter); always pass `line_items` — unfiltered as-filed pulls cost 28K-108K tokens and provenance comes from `trace_data_sources(relation=<financial_type>, keys=[{symbol, date, statement, line_item}])`. `situate`'s table cards name it in `read_by`. Synchronous, auth |
+| `company_s1(symbol, table_names, limit, sections)` | `POST /company-s1` | **One company's S-1 / S-1/A, read directly** — `s1_significant_passages` (default: one row per key passage with `passage_id`, `section`, `anchor`, `page_number`, `type`, verbatim `passage`, `why_significant`) and/or `s1_raw_tables` (`page_number`, `table_number`, `table_context`, `table_text`); every row carries `accession_no`, `form`, `filing_date`, `source_url`. `limit` 1-5 filings, default 1. An unfiltered passages read is ~390 KB, so call `list_s1_sections` first and pass `sections` (case-insensitive; filters passages only). S-1 web nodes in `situate` carry fetch hints with `{symbol, table_names, limit}`. 404 = no S-1 stored. Synchronous, auth |
+| `list_s1_sections(symbol)` | `GET /list-s1-sections` | The latest S-1's sections that hold key passages, in document order: `section`, `start_page`, `end_page`, `passages` (count), with `accession_no`, `form`, `filing_date`. Returns `{symbol, count, sections, note}`; the names are `company_s1`'s `sections` values. Public |
 | `explore_data_catalogue(query)` | `POST /data-catalogue-exploration` | **Default route** — fast, interactive EDA against the data platform → result sets to render as charts/tables (dashboard only, 20/hour) → `{task_id, status}` |
 | `explore_data_coverage(query)` | `POST /data-coverage-exploration` | **Coverage counts and breakdowns** — how many symbols carry a dataset (IR decks, transcripts, 13F, insider, estimates…), by sector / industry / country / market cap / year, and how far history goes. Public: no account needed, so prospects can ask what the platform covers |
 | `get_signed_sql_drilldown(encrypted_query_token, prompt, values, max_rows)` | `GET /query-data` | Follow a `situate` web node's `signed_query_url` (or its bare `t` token) to the rows behind it — new record flagged `is_new_record: true`, plus context rows; tokens are server-minted only, never constructed. Optional `values` (typed slot fill, no LLM) and `prompt` (natural language, fills what `values` left out) re-aim a token that is a placeholder twin at other entities; `max_rows` caps the payload, and a sliced reply carries `row_count` + `truncated: true` (authed) |
@@ -287,7 +289,7 @@ tools/
   realtime_events.py     situate, list_realtime_events, company snapshot, event ontology
   event_subscriptions.py stream_events, register / stream / delete_event_subscription (SSE bounded reads)
   pdf_reports.py         get_latest_report, list_available_reports, generate_*, download_pdf_from_url, PDF templates
-  data_exploration.py    explore_data_*, signed drilldowns, trace_data_sources, document sections, saved queries
+  data_exploration.py    company_financials, company_s1 / list_s1_sections, explore_data_*, signed drilldowns, trace_data_sources, document sections, saved queries
   utility.py             get_task_status, list_options, list_sub_industries, onboard_symbol, billing
   market_data.py         technical indicators, intraday outliers, after-hours bars, earnings calendar + move prediction, market status
   institutional_ownership.py  13F position changes, ownership by manager type, portfolio allocation
