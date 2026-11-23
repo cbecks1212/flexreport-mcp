@@ -1,14 +1,15 @@
-"""Investor-relations document tools: list a company's IR decks, read the analyst's take on them, read a deck's pages."""
+"""Investor-relations document tools: list a company's IR decks, read the analyst's take on them, read a deck's pages,
+read the financial tables extracted from its decks."""
 
 import re
-from typing import Annotated, Any
+from typing import Annotated, Any, Optional
 
 from mcp.server.fastmcp import Context
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from core import mcp, _send, _ok
+from core import mcp, _send, _ok, compact_output
 from schemas.ir_documents import IrContentResult, IrDocumentAnalysisResult, IrDocumentsResult
 
 
@@ -22,8 +23,8 @@ _URL_MAX_LENGTH = 2048
 _PAGE_FRAGMENT = re.compile(r"#page=\d+$")
 
 
-def _rows(resp: Any, path: str) -> list:
-    """The backend's list, with 429 (and, via _ok, 401 and every other error) raised as a ToolError."""
+def _payload(resp: Any, path: str) -> Any:
+    """The backend's JSON, with 429 (and, via _ok, 401 and every other error) raised as a ToolError."""
     if isinstance(resp, dict) and "HTTP 429" in str(resp.get("error", "")):
         detail = resp.get("detail")
         raise ToolError(
@@ -32,7 +33,12 @@ def _rows(resp: Any, path: str) -> list:
             "upgrade_plan if the user hit their plan quota."
             + (f" Backend detail: {str(detail)[:500]}" if detail not in (None, "") else "")
         )
-    rows = _ok(resp)
+    return _ok(resp)
+
+
+def _rows(resp: Any, path: str) -> list:
+    """The backend's list, with 429 (and, via _ok, 401 and every other error) raised as a ToolError."""
+    rows = _payload(resp, path)
     if not isinstance(rows, list):
         raise ToolError(f"Unexpected {path} response: {str(rows)[:500]}")
     return rows
@@ -149,3 +155,59 @@ async def get_ir_document_content(
         note = ("No extracted pages for this url. Pass a document_url exactly as list_ir_documents or "
                 "get_ir_document_analysis returned it, not the source_url.")
     return IrContentResult(url=url, count=len(pages), pages=pages, note=note)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="Get IR Financial Tables", readOnlyHint=True),
+    # Several decks of cell records; structured output would send the response twice.
+    structured_output=False,
+)
+@compact_output
+async def get_ir_financial_tables(
+    ctx: Context,
+    symbol: Annotated[str, Field(description="Covered ticker, e.g. \"AVNW\".", pattern=_TICKER_PATTERN)],
+    limit: Annotated[
+        int,
+        Field(description="Most recent documents to return tables for (1-50, default 5).", ge=1, le=50),
+    ] = 5,
+    fiscal_year: Annotated[
+        Optional[list[int]],
+        Field(description="Only documents for these fiscal years, e.g. [2026]. Omit for the most recent documents "
+                          "of any year."),
+    ] = None,
+) -> dict:
+    """The financial tables extracted from a company's most recent IR decks: management's own slide figures (non-GAAP metrics, segment results, KPIs, guidance ranges), each cell linked to its deck page.
+
+    These are MANAGEMENT'S ADJUSTED, UNAUDITED DECK FIGURES, not reported GAAP numbers. For
+    GAAP line items (revenue, net income, EPS as filed) use company_financials.
+
+    Returns the backend response as is, nested symbol -> document -> page:
+    {SYMBOL: {"documents": [{document_url, fiscal_year, fiscal_period,
+    fiscal_reporting_period, pages: {page_number: [cell, ...]}}]}}. Each cell record
+    carries a `page_url` (the deck page it was read from) and a `column_label`. Values come
+    back as strings, exactly as extracted from the slide.
+
+    PERIODS: the period a cell refers to is in its `column_label`, NOT the document's
+    fiscal_year / fiscal_period, which only date the deck. One deck can show prior-period
+    comparisons and forward guidance side by side.
+
+    PROVENANCE: WHEN YOU REPEAT A FIGURE, CITE ITS `page_url`. To read the surrounding
+    slide text, call get_ir_document_content(url=document_url) and open that page.
+
+    FLOW: list_ir_documents (what decks exist) -> get_ir_financial_tables (the figures) /
+    get_ir_document_analysis (the analyst's read) -> get_ir_document_content (the pages).
+
+    An empty result means no extracted tables for those decks, not that the company
+    published none: try list_ir_documents. A 422 means a bad symbol, limit or fiscal_year.
+    A 401 means the sign-in expired (your MCP client re-runs OAuth). Requires auth (your
+    MCP client attaches the OAuth bearer automatically). Rate-limited 100/min per user;
+    counts toward plan quota.
+    """
+    symbol = symbol.strip().upper()
+    body: dict[str, Any] = {"symbol": symbol, "limit": limit}
+    if fiscal_year is not None:
+        body["fiscal_year"] = fiscal_year
+    data = _payload(await _send(ctx, "POST", "/ir-financial-tables", json=body), "/ir-financial-tables")
+    if not isinstance(data, dict):
+        raise ToolError(f"Unexpected /ir-financial-tables response: {str(data)[:500]}")
+    return data
